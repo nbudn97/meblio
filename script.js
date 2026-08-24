@@ -377,11 +377,10 @@ async function loadOrders() {
   if (type) params.set("type", type);
   if (city) params.set("city", city);
   if (status) params.set("status", status);
+  if (budgetMin) params.set("budget_min", budgetMin);
+  if (budgetMax) params.set("budget_max", budgetMax);
   const data = await api(`/api/orders${params.toString() ? `?${params}` : ""}`);
-  let orders = data.orders;
-  if (budgetMin) orders = orders.filter(o => o.budget >= Number(budgetMin));
-  if (budgetMax) orders = orders.filter(o => o.budget <= Number(budgetMax));
-  state.orders = orders;
+  state.orders = data.orders;
 }
 
 async function loadMakers() {
@@ -666,6 +665,7 @@ function orderCard(order, showActions = true) {
         ${canChat ? `<button class="button button-secondary button-small" type="button" data-open-chat="${order.id}">Открыть чат</button>` : ""}
         ${canChoose ? `<button class="button button-secondary button-small" type="button" data-scroll-responses="${order.id}">Отклики: ${order.responses?.length || 0}</button>` : ""}
         ${(user?.id === order.client_id && (order.status === "open" || order.status === "progress")) ? `<button class="button button-secondary button-small" type="button" data-cancel-order="${order.id}">Отменить</button>` : ""}
+        ${(order.status === "progress" && (user?.id === order.client_id || user?.id === order.selected_maker_id)) ? `<button class="button button-primary button-small" type="button" data-close-order="${order.id}">Завершить</button>` : ""}
         <button class="button button-secondary button-small" type="button" data-export-order="${order.id}" title="Экспорт в PDF">📥</button>
         <button class="button button-secondary button-small" type="button" data-delivery-history="${order.id}" title="Доставка">🚚</button>
         <button class="button button-secondary button-small" type="button" data-order-history="${order.id}" title="История">📋</button>
@@ -2887,6 +2887,15 @@ document.addEventListener("click", async (event) => {
       if (confirm("Отменить заказ? Это действие нельзя отменить.")) {
         await api(`/api/orders/${orderId}/cancel`, { method: "POST", body: JSON.stringify({}) });
         showToast("Заказ отменён", "success");
+        await refreshData();
+        return render();
+      }
+    }
+    if (target.dataset.closeOrder) {
+      const orderId = Number(target.dataset.closeOrder);
+      if (confirm("Завершить заказ? После завершения можно оставить отзыв.")) {
+        await api(`/api/orders/${orderId}/close`, { method: "POST", body: JSON.stringify({}) });
+        showToast("Заказ завершён. Теперь можно оставить отзыв.", "success");
         await refreshData();
         return render();
       }

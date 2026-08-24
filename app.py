@@ -393,6 +393,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 return self.api_choose_maker(order_id)
             if path.endswith("/cancel"):
                 return self.api_cancel_order(order_id)
+            if path.endswith("/close"):
+                return self.api_close_order(order_id)
         if path == "/api/reports":
             return self.api_create_report()
         if path == "/api/gallery":
@@ -786,6 +788,14 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         if status_filter:
             where.append("orders.status = ?")
             values.append(status_filter)
+        budget_min = params.get("budget_min", [""])[0]
+        budget_max = params.get("budget_max", [""])[0]
+        if budget_min.isdigit():
+            where.append("orders.budget >= ?")
+            values.append(int(budget_min))
+        if budget_max.isdigit():
+            where.append("orders.budget <= ?")
+            values.append(int(budget_max))
         where_clause = (" WHERE " + " AND ".join(where)) if where else ""
         with connect() as conn:
             total = conn.execute(f"SELECT COUNT(*) FROM orders{where_clause}", values).fetchone()[0]
@@ -1015,6 +1025,29 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             if order["selected_maker_id"]:
                 create_notification(conn, order["selected_maker_id"], "order_status",
                     "Заказ отменён", f"Заказ «{order['title']}» был отменён заказчиком",
+                    f"/order/{order_id}")
+        self.send_json(200, {"ok": True})
+
+    def api_close_order(self, order_id):
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+            if not order:
+                return self.send_error_json(404, "Заказ не найден")
+            is_client = order["client_id"] == user["id"]
+            is_maker = order["selected_maker_id"] == user["id"]
+            if not (is_client or is_maker or user["role"] == "admin"):
+                return self.send_error_json(403, "Завершить заказ могут только участники сделки")
+            if order["status"] != "progress":
+                return self.send_error_json(400, "Завершить можно только заказ в работе")
+            conn.execute("UPDATE orders SET status = 'closed' WHERE id = ?", (order_id,))
+            self.log_order_change(conn, order_id, user["id"], "status", "progress", "closed")
+            other_party = order["client_id"] if is_maker else order["selected_maker_id"]
+            if other_party:
+                create_notification(conn, other_party, "order_status",
+                    "Заказ завершён", f"Заказ «{order['title']}» переведён в статус «Завершён»",
                     f"/order/{order_id}")
         self.send_json(200, {"ok": True})
 

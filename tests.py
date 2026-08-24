@@ -446,10 +446,12 @@ class AccountSecurityTests(unittest.TestCase):
 
 class DealAndModerationTests(unittest.TestCase):
     def _make_closed_deal(self):
+        import secrets as _secrets
+        tag = _secrets.token_hex(4)
         client = Client()
-        client.register("deal-client@test.local", name="Deal Client")
+        client.register(f"deal-client-{tag}@test.local", name="Deal Client")
         maker = Client()
-        maker.register("deal-maker@test.local", role="maker", name="Deal Maker")
+        maker.register(f"deal-maker-{tag}@test.local", role="maker", name="Deal Maker")
         fields = {"title": "Дельная сделка", "type": "Кухни", "quantity": "1",
                   "city": "Москва", "budget": "100000", "deadline": "10 дней", "details": "x"}
         body, ctype = make_multipart(fields, [])
@@ -502,6 +504,50 @@ class DealAndModerationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         status, data, _ = client.request("GET", "/api/orders?status=cancelled")
         self.assertTrue(any(o["id"] == order_id for o in data["orders"]))
+
+    def test_close_order_by_participants(self):
+        client, maker, order_id, maker_id = self._make_closed_deal()
+        # _make_closed_deal already closes via admin; make a fresh progress deal
+        client2 = Client()
+        client2.register("close-client@test.local", name="Close Client")
+        maker2 = Client()
+        maker2.register("close-maker@test.local", role="maker", name="Close Maker")
+        fields = {"title": "Закрываемая сделка", "type": "Кухни", "quantity": "1",
+                  "city": "Москва", "budget": "200000", "deadline": "10 дней", "details": "x"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = client2.request("POST", "/api/orders", raw_body=body,
+                                          headers={"Content-Type": ctype})
+        order_id2 = data["order"]["id"]
+        maker2.request("POST", f"/api/orders/{order_id2}/responses",
+                       body={"price": 190000, "days": 9, "message": "ok"})
+        status, data, _ = client2.request("GET", "/api/orders?status=open")
+        target = next(o for o in data["orders"] if o["id"] == order_id2)
+        maker_id2 = target["responses"][0]["maker_id"]
+        client2.request("POST", f"/api/orders/{order_id2}/choose", body={"maker_id": maker_id2})
+
+        stranger = Client()
+        stranger.register("close-stranger@test.local")
+        status, _, _ = stranger.request("POST", f"/api/orders/{order_id2}/close", body={})
+        self.assertEqual(status, 403)
+
+        status, _, _ = maker2.request("POST", f"/api/orders/{order_id2}/close", body={})
+        self.assertEqual(status, 200)
+        status, data, _ = client2.request("GET", "/api/orders?status=closed")
+        self.assertTrue(any(o["id"] == order_id2 for o in data["orders"]))
+
+    def test_budget_filter(self):
+        c = Client()
+        c.register("budget-filter@test.local")
+        fields = {"title": "Дешёвый", "type": "Тест", "quantity": "1",
+                  "city": "Москва", "budget": "1000", "deadline": "5 дней", "details": "x"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = c.request("POST", "/api/orders", raw_body=body,
+                                    headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        status, data, _ = c.request("GET", "/api/orders?budget_min=5000")
+        self.assertFalse(any(o["title"] == "Дешёвый" for o in data["orders"]))
+        status, data, _ = c.request("GET", "/api/orders?budget_max=5000&budget_min=0")
+        self.assertTrue(any(o["title"] == "Дешёвый" for o in data["orders"]))
 
     def test_report_flow(self):
         reporter = Client()
