@@ -709,6 +709,48 @@ class ChatFileTests(unittest.TestCase):
         self.assertEqual(status, 403)
 
 
+    def test_change_email_flow(self):
+        c = Client()
+        c.register("email-change@test.local")
+        status, data, _ = c.request("POST", "/api/change-email",
+                                    body={"new_email": "renamed@test.local", "password": "secret123"})
+        self.assertEqual(status, 200)
+        fresh = Client()
+        self.assertEqual(fresh.login("renamed@test.local", "secret123")[0], 200)
+        # duplicate email rejected
+        dup = Client()
+        dup.login("renamed@test.local", "secret123")
+        status, _, _ = dup.request("POST", "/api/change-email",
+                                   body={"new_email": "client@meblio.ru", "password": "secret123"})
+        self.assertEqual(status, 409)
+
+    def test_honeypot_rejects_bots(self):
+        c = Client()
+        status, data, _ = c.request(
+            "POST", "/api/register",
+            body={"role": "client", "name": "Bot", "email": "bot@test.local",
+                  "password": "secret123", "city": "Москва", "website": "http://spam.example"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("проверку", data["error"])
+
+    def test_delete_account_anonymizes(self):
+        import sqlite3
+        from db import DB_PATH
+        c = Client()
+        c.register("doomed@test.local")
+        status, _, _ = c.request("POST", "/api/delete-account",
+                                 body={"password": "wrong"})
+        self.assertEqual(status, 400)
+        status, _, _ = c.request("POST", "/api/delete-account",
+                                 body={"password": "secret123"})
+        self.assertEqual(status, 200)
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT name, email FROM users WHERE email LIKE 'deleted_%' ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "Удалённый пользователь")
+
+
 class MakerPortalTests(unittest.TestCase):
     def test_maker_stats(self):
         maker = Client()

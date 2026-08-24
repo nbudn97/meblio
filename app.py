@@ -229,6 +229,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         return False
 
     def _safe_dispatch(self, handler, *args, **kwargs):
+        import time as _time
+        started = _time.time()
         try:
             return handler(*args, **kwargs)
         except Exception:
@@ -238,6 +240,10 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             except Exception:
                 pass
             return None
+        finally:
+            elapsed = _time.time() - started
+            if elapsed > 1.0:
+                logger.warning("SLOW REQUEST %s %s took %.2fs", self.command, self.path, elapsed)
 
     def do_GET(self):
         return self._safe_dispatch(self._handle_GET)
@@ -381,6 +387,10 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.api_reset_password()
         if path == "/api/change-password":
             return self.api_change_password()
+        if path == "/api/change-email":
+            return self.api_change_email()
+        if path == "/api/delete-account":
+            return self.api_delete_account()
         if path == "/api/resend-verification":
             return self.api_resend_verification()
         if path == "/api/logout":
@@ -759,6 +769,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             role = data.get("role")
             if role not in ("client", "maker"):
                 return self.send_error_json(400, "Выберите роль")
+            if data.get("website"):
+                return self.send_error_json(400, "Регистрация не прошла проверку")
             if len(data.get("password", "")) < 6:
                 return self.send_error_json(400, "Пароль должен быть не короче 6 символов")
             company_type = data.get("company_type", "client" if role == "client" else "manufacturer")
@@ -1727,6 +1739,66 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             salt, digest = hash_password(new_password)
             conn.execute("UPDATE users SET password_salt = ?, password_hash = ? WHERE id = ?", (salt, digest, user["id"]))
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+        self.send_json(200, {"ok": True})
+
+    def api_change_email(self):
+        data = self.read_json()
+        new_email = data.get("new_email", "").strip().lower()
+        password = data.get("password", "")
+        if "@" not in new_email or "." not in new_email:
+            return self.send_error_json(400, "Некорректный email")
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            if not verify_password(password, user["password_salt"], user["password_hash"]):
+                return self.send_error_json(400, "Неверный пароль")
+            existing = conn.execute("SELECT id FROM users WHERE email = ? AND id != ?", (new_email, user["id"])).fetchone()
+            if existing:
+                return self.send_error_json(409, "Этот email уже занят")
+            conn.execute("UPDATE users SET email = ?, is_verified = 0 WHERE id = ?", (new_email, user["id"]))
+            verify_token = create_pending_token(conn, "email_verifications", user["id"], 60 * 24)
+            base_url = f"http://{self.headers.get('Host', '127.0.0.1:8000')}"
+            from mailer import send_email
+            send_email(
+                new_email,
+                "Подтвердите новый email на Meblio",
+                "Для подтверждения адреса перейдите по ссылке:",
+                link_url=f"{base_url}/api/verify-email?token={verify_token}",
+            )
+            payload = {"ok": True}
+            if os.environ.get("MEBLIO_DEV", "1") == "1":
+                payload["verify_url"] = f"{base_url}/api/verify-email?token={verify_token}"
+        self.send_json(200, payload)
+
+    def api_delete_account(self):
+        data = self.read_json()
+        password = data.get("password", "")
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            if user["role"] == "admin":
+                return self.send_error_json(400, "Администратор не может удалить свой аккаунт")
+            if not verify_password(password, user["password_salt"], user["password_hash"]):
+                return self.send_error_json(400, "Неверный пароль")
+            # anonymize instead of hard delete: keep orders/reviews history intact
+            anon_email = f"deleted_{user['id']}_{secrets.token_hex(4)}@meblio.local"
+            conn.execute(
+                "UPDATE users SET name = ?, email = ?, city = '', phone = '', about = '', skills = '', capacity = '', logo = '', is_verified = 0 WHERE id = ?",
+                ("Удалённый пользователь", anon_email, user["id"]),
+            )
+            conn.execute(
+                "UPDATE users SET password_salt = ?, password_hash = ? WHERE id = ?",
+                (secrets.token_hex(16), secrets.token_hex(64), user["id"]),
+            )
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+            conn.execute("DELETE FROM api_tokens WHERE user_id = ?", (user["id"],))
+            for table in ("favorites", "notification_preferences", "csrf_tokens"):
+                try:
+                    conn.execute(f"DELETE FROM {table} WHERE {'user_id' if table != 'csrf_tokens' else 'user_id'} = ?", (user["id"],))
+                except sqlite3.OperationalError:
+                    pass
         self.send_json(200, {"ok": True})
 
     # --- Excel Export ---

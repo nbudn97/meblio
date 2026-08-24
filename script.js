@@ -1133,6 +1133,18 @@ function profileForm() {
       <label class="full">Текущий пароль <input name="old_password" type="password" required></label>
       <label class="full">Новый пароль <input name="new_password" type="password" minlength="6" placeholder="Не короче 6 символов" required></label>
       <button class="button button-secondary full" type="submit">Сменить пароль</button>
+    </form>
+    <h3 style="margin:24px 0 8px">Смена email</h3>
+    <form class="stack-form grid-form" id="changeEmailForm">
+      <label class="full">Новый email <input name="new_email" type="email" required></label>
+      <label class="full">Текущий пароль <input name="password" type="password" required></label>
+      <button class="button button-secondary full" type="submit">Сменить email</button>
+    </form>
+    <h3 style="margin:24px 0 8px; color: var(--danger, #dc2626)">Удаление аккаунта</h3>
+    <form class="stack-form grid-form" id="deleteAccountForm">
+      <p class="muted full">Аккаунт будет обезличен (заказы и отзывы сохранятся без ваших данных). Действие необратимо.</p>
+      <label class="full">Пароль <input name="password" type="password" required></label>
+      <button class="button button-secondary full" type="submit">Удалить аккаунт</button>
     </form>`;
 }
 
@@ -3156,6 +3168,23 @@ document.addEventListener("submit", async (event) => {
       const data = Object.fromEntries(new FormData(event.target));
       await api("/api/change-password", { method: "POST", body: JSON.stringify(data) });
       showToast("Пароль изменён. Войдите заново.", "success");
+      state.user = null;
+      return render();
+    }
+    if (event.target.id === "changeEmailForm") {
+      const data = Object.fromEntries(new FormData(event.target));
+      const result = await api("/api/change-email", { method: "POST", body: JSON.stringify(data) });
+      if (result.verify_url) state.verifyUrl = result.verify_url;
+      showToast("Email изменён. Подтвердите новый адрес.", "success");
+      await loadSession();
+      showVerifyBanner();
+      return render();
+    }
+    if (event.target.id === "deleteAccountForm") {
+      const data = Object.fromEntries(new FormData(event.target));
+      if (!confirm("Удалить аккаунт? Это действие необратимо.")) return;
+      await api("/api/delete-account", { method: "POST", body: JSON.stringify(data) });
+      showToast("Аккаунт удалён", "success");
       state.user = null;
       return render();
     }
