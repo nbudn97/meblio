@@ -1,5 +1,26 @@
 # Деплой Meblio в продакшен
 
+## 0. Подключение Git-remote (активирует CI)
+
+Готовые файлы: `.github/workflows/test.yml` (тесты на Python 3.11–3.13) запускаются автоматически при первом push.
+
+**Вариант А — GitHub CLI:**
+
+```powershell
+winget install GitHub.cli
+gh auth login
+gh repo create meblio --private --source . --remote origin --push
+```
+
+**Вариант Б — вручную:** создайте пустой репозиторий на github.com, затем:
+
+```bash
+git remote add origin https://github.com/<ваш-логин>/meblio.git
+git push -u origin master
+```
+
+Статус CI: вкладка **Actions** в репозитории.
+
 ## 1. Требования
 
 - Python 3.11+ (только stdlib, зависимостей нет)
@@ -19,27 +40,14 @@
 
 ## 3. Запуск как сервис
 
+Готовые файлы: [`deploy/nginx.conf`](../deploy/nginx.conf), [`deploy/meblio.service`](../deploy/meblio.service).
+
 ### Linux (systemd)
 
-`/etc/systemd/system/meblio.service`:
-
-```ini
-[Unit]
-Description=Meblio marketplace
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/meblio
-ExecStart=/usr/bin/python3 app.py
-Restart=always
-User=meblio
-Environment=MEBLIO_DEV=0
-
-[Install]
-WantedBy=multi-user.target
-```
+Скопируйте юнит и запустите:
 
 ```bash
+sudo cp deploy/meblio.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now meblio
 ```
 
@@ -52,41 +60,7 @@ schtasks /Create /TN "Meblio" /SC ONSTART /RU SYSTEM ^
 
 ## 4. HTTPS через nginx
 
-Cookie помечены `Secure`, PWA требует TLS — вне localhost нужен HTTPS.
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name meblio.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/meblio/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/meblio/privkey.pem;
-
-    client_max_body_size 30m;   # загрузки до 25 МБ + запас
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-
-    # WebSocket
-    location ~ ^/(ws)?$ {
-        proxy_pass http://127.0.0.1:8001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 300s;
-    }
-}
-
-server {
-    listen 80;
-    server_name meblio.example.com;
-    return 301 https://$host$request_uri;
-}
-```
+Готовый конфиг: [`deploy/nginx.conf`](../deploy/nginx.conf). Cookie помечены `Secure`, PWA требует TLS — вне localhost нужен HTTPS.
 
 Сертификат: `sudo certbot --nginx -d meblio.example.com`.
 

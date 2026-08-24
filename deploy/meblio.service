@@ -1,0 +1,14 @@
+[Unit]
+Description=Meblio marketplace
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/meblio
+ExecStart=/usr/bin/python3 app.py
+Restart=always
+RestartSec=3
+User=meblio
+Environment=MEBLIO_DEV=0
+
+[Install]
+WantedBy=multi-user.target
