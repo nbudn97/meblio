@@ -43,6 +43,7 @@ class Client:
     def __init__(self):
         self.token = None
         self.csrf = None
+        self.device_cookie = None
 
     def request(self, method, path, body=None, headers=None, raw_body=None):
         url = _base_url + quote(path, safe="/?&=")
@@ -51,8 +52,13 @@ class Client:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             req_headers.setdefault("Content-Type", "application/json")
+        cookie_parts = []
         if self.token:
-            req_headers.setdefault("Cookie", f"meblio_session={self.token}")
+            cookie_parts.append(f"meblio_session={self.token}")
+        if self.device_cookie:
+            cookie_parts.append(f"meblio_device={self.device_cookie}")
+        if cookie_parts:
+            req_headers.setdefault("Cookie", "; ".join(cookie_parts))
         if self.csrf and method not in ("GET", "HEAD"):
             req_headers.setdefault("X-CSRF-Token", self.csrf)
         req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
@@ -61,10 +67,12 @@ class Client:
             status = resp.status
             payload = resp.read()
             resp_headers = dict(resp.headers)
+            resp_headers["_set_cookie_all"] = resp.headers.get_all("Set-Cookie") or []
         except urllib.error.HTTPError as err:
             status = err.code
             payload = err.read()
             resp_headers = dict(err.headers)
+            resp_headers["_set_cookie_all"] = err.headers.get_all("Set-Cookie") or []
             err.close()
         parsed = {}
         if payload:
@@ -432,9 +440,13 @@ class AccountSecurityTests(unittest.TestCase):
         status, data, headers = c.request("POST", "/api/tfa/login",
                                           body={"login_token": login_token, "code": totp_code(secret)})
         self.assertEqual(status, 200)
-        set_cookie = headers.get("Set-Cookie", "")
-        self.assertIn("meblio_session=", set_cookie)
-        c.token = set_cookie.split("meblio_session=", 1)[1].split(";", 1)[0]
+        all_cookies = " ".join(headers.get("_set_cookie_all", []))
+        self.assertIn("meblio_session=", all_cookies)
+        self.assertIn("meblio_device=", all_cookies)
+        c.token = all_cookies.split("meblio_session=", 1)[1].split(";", 1)[0]
+        device_part = [part for part in all_cookies.replace(" ", "\n").split("\n") if part.startswith("meblio_device=")]
+        self.assertTrue(device_part)
+        c.device_cookie = device_part[0].split("=", 1)[1].split(";", 1)[0]
         self.assertIsNotNone(c.token)
         status, data, _ = c.request("GET", "/api/session")
         self.assertIsNotNone(data["user"])
@@ -442,6 +454,23 @@ class AccountSecurityTests(unittest.TestCase):
         status, data, _ = c.request("POST", "/api/tfa/login",
                                     body={"login_token": login_token, "code": "000000"})
         self.assertEqual(status, 400)
+
+        # trusted device: next login skips 2FA entirely
+        fresh = Client()
+        fresh.device_cookie = c.device_cookie
+        status, data, headers = fresh.request("POST", "/api/login",
+                                              body={"email": "tfa-user@test.local", "password": "secret123"})
+        self.assertEqual(status, 200)
+        self.assertNotIn("tfa_required", data)
+        all_cookies = " ".join(headers.get("_set_cookie_all", []))
+        self.assertIn("meblio_session=", all_cookies)
+        fresh.token = all_cookies.split("meblio_session=", 1)[1].split(";", 1)[0]
+        self.assertIsNotNone(fresh.token)
+        # other devices still require the code
+        other = Client()
+        status, data, _ = other.request("POST", "/api/login",
+                                        body={"email": "tfa-user@test.local", "password": "secret123"})
+        self.assertTrue(data.get("tfa_required"))
 
 
 class DealAndModerationTests(unittest.TestCase):

@@ -113,6 +113,52 @@ def verify_totp(secret, code):
     return False
 
 
+TRUST_DEVICE_COOKIE = "meblio_device"
+TRUST_DEVICE_DAYS = 30
+
+
+def get_tfa_trust_secret(conn):
+    row = conn.execute("SELECT value FROM app_config WHERE key = 'tfa_trust_secret'").fetchone()
+    if row:
+        return row["value"]
+    secret = secrets.token_hex(32)
+    conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('tfa_trust_secret', ?)", (secret,))
+    return secret
+
+
+def make_trust_cookie(secret, user_id):
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import time as _time
+    expires = int(_time.time()) + TRUST_DEVICE_DAYS * 86400
+    sig = _hmac.new(secret.encode(), f"{user_id}:{expires}".encode(), _hashlib.sha256).hexdigest()
+    return f"{user_id}:{expires}:{sig}"
+
+
+def verify_trust_cookie(secret, cookie_value):
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import time as _time
+    try:
+        user_id, expires, sig = cookie_value.split(":")
+        expected = _hmac.new(secret.encode(), f"{user_id}:{expires}".encode(), _hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(sig, expected):
+            return None
+        if int(expires) < _time.time():
+            return None
+        return int(user_id)
+    except (ValueError, TypeError):
+        return None
+
+
+def read_trusted_user_id(self, conn):
+    jar = cookies.SimpleCookie(self.headers.get("Cookie", ""))
+    raw = jar.get(TRUST_DEVICE_COOKIE)
+    if not raw:
+        return None
+    return verify_trust_cookie(get_tfa_trust_secret(conn), raw.value)
+
+
 def create_pending_token(conn, table, user_id, minutes):
     import datetime
     token = secrets.token_urlsafe(32)
@@ -162,7 +208,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         if extra_headers:
             for key, value in extra_headers.items():
-                self.send_header(key, value)
+                for single in (value if isinstance(value, list) else [value]):
+                    self.send_header(key, single)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -752,13 +799,18 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 if not user or not verify_password(data.get("password", ""), user["password_salt"], user["password_hash"]):
                     return self.send_error_json(401, "Неверный email или пароль")
                 tfa = conn.execute("SELECT * FROM tfa_secrets WHERE user_id = ? AND enabled = 1", (user["id"],)).fetchone()
-                if tfa:
+                trusted = bool(tfa) and read_trusted_user_id(self, conn) == user["id"]
+                if tfa and not trusted:
                     login_token = create_pending_token(conn, "pending_tfa", user["id"], 10)
                     return self.send_json(200, {"tfa_required": True, "login_token": login_token})
                 token = secrets.token_urlsafe(32)
                 purge_expired_sessions(conn)
                 conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], now()))
-            self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"})
+                trust_value = make_trust_cookie(get_tfa_trust_secret(conn), user["id"]) if tfa else None
+            cookies_to_set = [f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"]
+            if trust_value:
+                cookies_to_set.append(f"{TRUST_DEVICE_COOKIE}={trust_value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={TRUST_DEVICE_DAYS * 86400}")
+            self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": cookies_to_set})
         except Exception as exc:
             self.send_error_json(400, str(exc))
 
@@ -1574,7 +1626,11 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             token = secrets.token_urlsafe(32)
             purge_expired_sessions(conn)
             conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], now()))
-        self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"})
+            trust_value = make_trust_cookie(get_tfa_trust_secret(conn), user["id"])
+        self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": [
+            f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800",
+            f"{TRUST_DEVICE_COOKIE}={trust_value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={TRUST_DEVICE_DAYS * 86400}",
+        ]})
 
     # --- Password recovery ---
     def api_forgot_password(self):
