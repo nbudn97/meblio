@@ -62,8 +62,23 @@
             Пароль
             <input name="password" type="password" placeholder="Не короче 6 символов" required>
           </label>
-          <button class="button button-primary" type="submit">Войти</button>
+          <div class="hidden" id="tfaRow">
+            <label>
+              Код двухфакторной аутентификации
+              <input name="tfa_code" id="tfaCode" type="text" inputmode="numeric" placeholder="6 цифр из приложения" autocomplete="one-time-code">
+            </label>
+          </div>
+          <button class="button button-primary" id="loginSubmitBtn" type="submit">Войти</button>
           <p class="hint">Демо-вход: client@meblio.ru / client123 или maker@meblio.ru / maker123</p>
+          <button class="hint link-button" type="button" id="forgotLink">Забыли пароль?</button>
+        </form>
+        <form class="stack-form hidden" id="forgotForm">
+          <label>
+            Email
+            <input name="email" type="email" placeholder="mail@example.ru" required>
+          </label>
+          <button class="button button-primary" type="submit">Выслать ссылку восстановления</button>
+          <button class="hint link-button" type="button" id="forgotCancel">← Назад ко входу</button>
         </form>
         <form class="stack-form hidden" id="registerForm">
           <label>

@@ -86,7 +86,41 @@ CERTIFICATE_RE = re.compile(r"^/api/certificates/(\d+)$")
 TIMEENTRY_RE = re.compile(r"^/api/time-entries/(\d+)$")
 CLIENT_RATING_RE = re.compile(r"^/api/client-ratings/(\d+)$")
 
-CSRF_EXEMPT_PATHS = {"/api/login", "/api/register", "/api/csrf-token"}
+CSRF_EXEMPT_PATHS = {"/api/login", "/api/register", "/api/csrf-token", "/api/tfa/login"}
+
+
+def verify_totp(secret, code):
+    """Check a 6-digit TOTP code against a base32 secret (30s window, ±1 step)."""
+    import base64 as _b64
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import struct as _struct
+    import time as _time
+    try:
+        secret_bytes = _b64.b32decode(secret)
+        counter = int(_time.time()) // 30
+        for offset in (-1, 0, 1):
+            msg = _struct.pack(">Q", counter + offset)
+            h = _hmac.new(secret_bytes, msg, _hashlib.sha1).digest()
+            o = h[-1] & 0x0F
+            num = _struct.unpack(">I", h[o:o + 4])[0] & 0x7FFFFFFF
+            if str(num % 1000000).zfill(6) == code:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def create_pending_token(conn, table, user_id, minutes):
+    import datetime
+    token = secrets.token_urlsafe(32)
+    expires = (datetime.datetime.now() + datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        f"INSERT INTO {table} (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+        (token, user_id, expires, now()),
+    )
+    conn.execute(f"DELETE FROM {table} WHERE expires_at < ?", (now(),))
+    return token
 
 
 def generate_csrf_token(conn, session_token):
@@ -173,6 +207,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/healthz":
             return self.send_json(200, {"ok": True, "app": "meblio", "time": now()})
+        if path == "/api/verify-email":
+            return self.api_verify_email(parsed.query)
         if path == "/api/session":
             return self.api_session()
         if path == "/api/orders":
@@ -284,6 +320,16 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.api_register()
         if path == "/api/login":
             return self.api_login()
+        if path == "/api/tfa/login":
+            return self.api_tfa_login()
+        if path == "/api/forgot-password":
+            return self.api_forgot_password()
+        if path == "/api/reset-password":
+            return self.api_reset_password()
+        if path == "/api/change-password":
+            return self.api_change_password()
+        if path == "/api/resend-verification":
+            return self.api_resend_verification()
         if path == "/api/logout":
             return self.api_logout()
         if path == "/api/orders":
@@ -516,6 +562,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             "skills": [item.strip() for item in user["skills"].split(",") if item.strip()],
             "capacity": user["capacity"],
             "logo": user["logo"],
+            "is_verified": bool(user.get("is_verified")),
             "created_at": user["created_at"],
         }
 
@@ -625,7 +672,20 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 purge_expired_sessions(conn)
                 conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user_id, now()))
                 user = conn.execute("SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE users.id = ?", (user_id,)).fetchone()
-            self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"})
+                email = user["email"]
+                verify_token = create_pending_token(conn, "email_verifications", user_id, 60 * 24)
+                base_url = f"http://{self.headers.get('Host', '127.0.0.1:8000')}"
+                from mailer import send_email
+                send_email(
+                    email,
+                    "Подтвердите email на Meblio",
+                    "Для подтверждения адреса перейдите по ссылке:",
+                    link_url=f"{base_url}/api/verify-email?token={verify_token}",
+                )
+            payload = {"user": self.public_user(row_to_dict(user))}
+            if os.environ.get("MEBLIO_DEV", "1") == "1":
+                payload["verify_url"] = f"{base_url}/api/verify-email?token={verify_token}"
+            self.send_json(200, payload, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"})
         except sqlite3.IntegrityError:
             self.send_error_json(409, "Пользователь с таким email уже зарегистрирован")
         except Exception as exc:
@@ -642,6 +702,10 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 user = conn.execute("SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE email = ?", (data.get("email", "").strip().lower(),)).fetchone()
                 if not user or not verify_password(data.get("password", ""), user["password_salt"], user["password_hash"]):
                     return self.send_error_json(401, "Неверный email или пароль")
+                tfa = conn.execute("SELECT * FROM tfa_secrets WHERE user_id = ? AND enabled = 1", (user["id"],)).fetchone()
+                if tfa:
+                    login_token = create_pending_token(conn, "pending_tfa", user["id"], 10)
+                    return self.send_json(200, {"tfa_required": True, "login_token": login_token})
                 token = secrets.token_urlsafe(32)
                 purge_expired_sessions(conn)
                 conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], now()))
@@ -1180,11 +1244,6 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         self.send_json(200, {"secret": secret, "otpauth": f"otpauth://totp/Meblio:{user['email']}?secret={secret}&issuer=Meblio"})
 
     def api_tfa_verify(self):
-        import hmac as _hmac
-        import hashlib as _hashlib
-        import base64 as _b64
-        import struct as _struct
-        import time as _time
         data = self.read_json()
         code = data.get("code", "")
         enable = data.get("enable", False)
@@ -1195,20 +1254,130 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             tfa = conn.execute("SELECT * FROM tfa_secrets WHERE user_id = ?", (user["id"],)).fetchone()
             if not tfa:
                 return self.send_error_json(400, "Сначала настройте 2FA")
-            # Simple TOTP verification (30s window, 6 digits)
-            secret_bytes = _b64.b32decode(tfa["secret"])
-            counter = int(_time.time()) // 30
-            for offset in (-1, 0, 1):
-                msg = _struct.pack(">Q", counter + offset)
-                h = _hmac.new(secret_bytes, msg, _hashlib.sha1).digest()
-                o = h[-1] & 0x0F
-                num = _struct.unpack(">I", h[o:o+4])[0] & 0x7FFFFFFF
-                if str(num % 1000000).zfill(6) == code:
-                    if enable:
-                        conn.execute("UPDATE tfa_secrets SET enabled = 1 WHERE user_id = ?", (user["id"],))
-                    self.send_json(200, {"ok": True})
-                    return
-        self.send_error_json(400, "Неверный код")
+            if not verify_totp(tfa["secret"], code):
+                return self.send_error_json(400, "Неверный код")
+            if enable:
+                conn.execute("UPDATE tfa_secrets SET enabled = 1 WHERE user_id = ?", (user["id"],))
+        self.send_json(200, {"ok": True})
+
+    # --- Email verification ---
+    def api_resend_verification(self):
+        data = self.read_json()
+        email = data.get("email", "").strip().lower()
+        with connect() as conn:
+            user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            if not user:
+                return self.send_error_json(404, "Пользователь не найден")
+            if user["is_verified"]:
+                return self.send_json(200, {"ok": True, "already_verified": True})
+            verify_token = create_pending_token(conn, "email_verifications", user["id"], 60 * 24)
+            base_url = f"http://{self.headers.get('Host', '127.0.0.1:8000')}"
+            from mailer import send_email
+            send_email(
+                user["email"],
+                "Подтвердите email на Meblio",
+                "Для подтверждения адреса перейдите по ссылке:",
+                link_url=f"{base_url}/api/verify-email?token={verify_token}",
+            )
+            payload = {"ok": True}
+            if os.environ.get("MEBLIO_DEV", "1") == "1":
+                payload["verify_url"] = f"{base_url}/api/verify-email?token={verify_token}"
+        self.send_json(200, payload)
+
+    def api_verify_email(self, query):
+        params = parse_qs(query)
+        token = params.get("token", [""])[0]
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM email_verifications WHERE token = ? AND purpose = 'verify' AND expires_at > ?",
+                (token, now()),
+            ).fetchone()
+            if not row:
+                return self.send_error_json(400, "Ссылка недействительна или устарела")
+            conn.execute("UPDATE users SET is_verified = 1 WHERE id = ?", (row["user_id"],))
+            conn.execute("DELETE FROM email_verifications WHERE token = ?", (token,))
+        self.send_json(200, {"ok": True, "verified": True})
+
+    # --- 2FA login (second step) ---
+    def api_tfa_login(self):
+        data = self.read_json()
+        login_token = data.get("login_token", "")
+        code = data.get("code", "")
+        with connect() as conn:
+            pending = conn.execute(
+                "SELECT * FROM pending_tfa WHERE token = ? AND expires_at > ?",
+                (login_token, now()),
+            ).fetchone()
+            if not pending:
+                return self.send_error_json(400, "Сессия входа истекла, повторите вход")
+            user = conn.execute("SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE users.id = ?", (pending["user_id"],)).fetchone()
+            if not user:
+                return self.send_error_json(400, "Пользователь не найден")
+            tfa = conn.execute("SELECT * FROM tfa_secrets WHERE user_id = ?", (user["id"],)).fetchone()
+            if not tfa or not tfa["enabled"] or not verify_totp(tfa["secret"], code):
+                return self.send_error_json(400, "Неверный код")
+            conn.execute("DELETE FROM pending_tfa WHERE token = ?", (login_token,))
+            token = secrets.token_urlsafe(32)
+            purge_expired_sessions(conn)
+            conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], now()))
+        self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"})
+
+    # --- Password recovery ---
+    def api_forgot_password(self):
+        data = self.read_json()
+        email = data.get("email", "").strip().lower()
+        with connect() as conn:
+            user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            if user:
+                token = create_pending_token(conn, "email_verifications", user["id"], 60)
+                conn.execute(
+                    "UPDATE email_verifications SET purpose = 'reset' WHERE token = ?", (token,)
+                )
+                base_url = f"http://{self.headers.get('Host', '127.0.0.1:8000')}"
+                from mailer import send_email
+                send_email(
+                    email,
+                    "Восстановление пароля Meblio",
+                    "Для восстановления пароля перейдите по ссылке:",
+                    link_url=f"{base_url}/reset-password?token={token}",
+                )
+        self.send_json(200, {"ok": True})
+
+    def api_reset_password(self):
+        data = self.read_json()
+        token = data.get("token", "")
+        password = data.get("password", "")
+        if len(password) < 6:
+            return self.send_error_json(400, "Пароль должен быть не короче 6 символов")
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM email_verifications WHERE token = ? AND purpose = 'reset' AND expires_at > ?",
+                (token, now()),
+            ).fetchone()
+            if not row:
+                return self.send_error_json(400, "Ссылка недействительна или устарела")
+            salt, digest = hash_password(password)
+            conn.execute("UPDATE users SET password_salt = ?, password_hash = ? WHERE id = ?", (salt, digest, row["user_id"]))
+            conn.execute("DELETE FROM email_verifications WHERE token = ?", (token,))
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["user_id"],))
+        self.send_json(200, {"ok": True})
+
+    def api_change_password(self):
+        data = self.read_json()
+        old_password = data.get("old_password", "")
+        new_password = data.get("new_password", "")
+        if len(new_password) < 6:
+            return self.send_error_json(400, "Пароль должен быть не короче 6 символов")
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            if not verify_password(old_password, user["password_salt"], user["password_hash"]):
+                return self.send_error_json(400, "Неверный текущий пароль")
+            salt, digest = hash_password(new_password)
+            conn.execute("UPDATE users SET password_salt = ?, password_hash = ? WHERE id = ?", (salt, digest, user["id"]))
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+        self.send_json(200, {"ok": True})
 
     # --- Excel Export ---
     def api_export_excel(self):

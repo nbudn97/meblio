@@ -64,6 +64,7 @@ const state = {
   totalHours: 0,
   clientRatings: [],
   clientAvgRating: 0,
+  verifyUrl: null,
 };
 
 let deadlineTimers = [];
@@ -253,6 +254,7 @@ async function loadSession() {
     loadNotifications();
     loadNotifPrefs();
     requestPushPermission();
+    showVerifyBanner();
   }
 }
 
@@ -1081,6 +1083,12 @@ function profileForm() {
       ` : '<input type="hidden" name="capacity" value=""><input type="hidden" name="skills" value="">'}
       <label class="full">Описание <textarea name="about" rows="4">${escapeHtml(user.about || "")}</textarea></label>
       <button class="button button-primary full" type="submit">Сохранить профиль</button>
+    </form>
+    <h3 style="margin:24px 0 8px">Смена пароля</h3>
+    <form class="stack-form grid-form" id="changePwForm">
+      <label class="full">Текущий пароль <input name="old_password" type="password" required></label>
+      <label class="full">Новый пароль <input name="new_password" type="password" minlength="6" placeholder="Не короче 6 символов" required></label>
+      <button class="button button-secondary full" type="submit">Сменить пароль</button>
     </form>`;
 }
 
@@ -3029,6 +3037,13 @@ document.addEventListener("submit", async (event) => {
       showToast("Профиль сохранён", "success");
       return render();
     }
+    if (event.target.id === "changePwForm") {
+      const data = Object.fromEntries(new FormData(event.target));
+      await api("/api/change-password", { method: "POST", body: JSON.stringify(data) });
+      showToast("Пароль изменён. Войдите заново.", "success");
+      state.user = null;
+      return render();
+    }
     if (event.target.id === "reviewForm") {
       const companyId = event.target.dataset.companyId;
       const data = Object.fromEntries(new FormData(event.target));
@@ -3151,11 +3166,36 @@ document.addEventListener("submit", async (event) => {
   } catch (error) { showToast(error.message); }
 });
 
+let pendingLoginToken = null;
+
+const forgotForm = document.querySelector("#forgotForm");
+
+function showTfaStep(show) {
+  document.querySelector("#tfaRow").classList.toggle("hidden", !show);
+  document.querySelector("#loginSubmitBtn").textContent = show ? "Подтвердить код" : "Войти";
+}
+
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   authMessage.textContent = "";
   try {
-    const result = await api("/api/login", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(loginForm))) });
+    const formData = Object.fromEntries(new FormData(loginForm));
+    if (pendingLoginToken) {
+      const result = await api("/api/tfa/login", { method: "POST", body: JSON.stringify({ login_token: pendingLoginToken, code: String(formData.tfa_code || "").trim() }) });
+      pendingLoginToken = null;
+      csrfToken = null;
+      await ensureCsrfToken();
+      state.user = result.user; state.view = "dashboard"; state.dashboardTab = "overview";
+      closeAuth(); await render();
+      return;
+    }
+    const result = await api("/api/login", { method: "POST", body: JSON.stringify({ email: formData.email, password: formData.password }) });
+    if (result.tfa_required) {
+      pendingLoginToken = result.login_token;
+      showTfaStep(true);
+      authMessage.textContent = "Введите код из приложения аутентификации";
+      return;
+    }
     csrfToken = null;
     await ensureCsrfToken();
     state.user = result.user; state.view = "dashboard"; state.dashboardTab = "overview";
@@ -3170,10 +3210,82 @@ registerForm.addEventListener("submit", async (event) => {
     const result = await api("/api/register", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(registerForm))) });
     csrfToken = null;
     await ensureCsrfToken();
+    state.verifyUrl = result.verify_url || state.verifyUrl;
     state.user = result.user; state.view = "dashboard"; state.dashboardTab = "overview";
     closeAuth(); await render();
+    showVerifyBanner();
   } catch (error) { authMessage.textContent = error.message; }
 });
+
+document.querySelector("#forgotLink").addEventListener("click", () => {
+  loginForm.classList.add("hidden");
+  forgotForm.classList.remove("hidden");
+});
+
+document.querySelector("#forgotCancel").addEventListener("click", () => {
+  forgotForm.classList.add("hidden");
+  loginForm.classList.remove("hidden");
+});
+
+forgotForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  authMessage.textContent = "";
+  try {
+    const email = new FormData(forgotForm).get("email");
+    await api("/api/forgot-password", { method: "POST", body: JSON.stringify({ email }) });
+    forgotForm.classList.add("hidden");
+    loginForm.classList.remove("hidden");
+    authMessage.textContent = "Ссылка восстановления отправлена на почту";
+  } catch (error) { authMessage.textContent = error.message; }
+});
+
+function showVerifyBanner() {
+  const target = document.querySelector(".site-header");
+  if (!target || !state.user || state.user.is_verified) return;
+  if (document.querySelector("#verifyBanner")) return;
+  const banner = document.createElement("div");
+  banner.id = "verifyBanner";
+  banner.style.cssText = "background:#fef3c7;color:#92400e;padding:8px 20px;text-align:center;font-size:14px;";
+  const link = state.verifyUrl
+    ? `<a href="${escapeHtml(state.verifyUrl)}" style="color:#1d4ed8;font-weight:600;">Подтвердить email</a>`
+    : `<button type="button" id="resendVerify" style="color:#1d4ed8;font-weight:600;background:none;border:none;cursor:pointer;text-decoration:underline;">Выслать ссылку заново</button>`;
+  banner.innerHTML = `Подтвердите адрес электронной почты. ${link} `;
+  target.after(banner);
+  document.querySelector("#resendVerify")?.addEventListener("click", async () => {
+    try {
+      const data = await api("/api/resend-verification", { method: "POST", body: JSON.stringify({ email: state.user.email }) });
+      if (data.verify_url) state.verifyUrl = data.verify_url;
+      showToast("Ссылка отправлена", "success");
+    } catch (error) { showToast(error.message); }
+  });
+}
+
+function renderResetPassword(token) {
+  app.innerHTML = `
+    <section class="section"><div class="container">
+      <div class="card" style="max-width:420px;margin:0 auto;">
+        <h1>Восстановление пароля</h1>
+        <form id="resetPwForm" class="stack-form">
+          <label>Новый пароль
+            <input name="password" type="password" minlength="6" placeholder="Не короче 6 символов" required>
+          </label>
+          <button class="button button-primary" type="submit">Сохранить пароль</button>
+        </form>
+        <p class="form-result" id="resetPwMsg" aria-live="polite"></p>
+      </div>
+    </div></section>`;
+  document.querySelector("#resetPwForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const msg = document.querySelector("#resetPwMsg");
+    try {
+      const password = new FormData(event.target).get("password");
+      await api("/api/reset-password", { method: "POST", body: JSON.stringify({ token, password }) });
+      msg.textContent = "Пароль изменён. Войдите с новым паролем.";
+      msg.style.color = "#16a34a";
+    } catch (error) { msg.textContent = error.message; }
+  });
+}
+
 
 document.querySelectorAll("[data-auth-tab]").forEach((b) => b.addEventListener("click", () => setAuthTab(b.dataset.authTab)));
 
@@ -3183,3 +3295,9 @@ if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
 loadSession().then(render).catch((error) => {
   app.innerHTML = `<section class="section"><div class="container"><div class="empty">${escapeHtml(error.message)}</div></div></section>`;
 });
+
+const resetToken = new URLSearchParams(location.search).get("token");
+if (location.pathname.startsWith("/reset-password") && resetToken) {
+  document.title = "Восстановление пароля — Meblio";
+  renderResetPassword(resetToken);
+}

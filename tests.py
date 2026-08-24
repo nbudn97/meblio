@@ -346,6 +346,104 @@ class WsAuthzTests(unittest.TestCase):
         self.assertIsNone(validate_session("not-a-real-token"))
 
 
+def totp_code(secret):
+    import base64
+    import hashlib
+    import hmac
+    import struct
+    import time
+    key = base64.b32decode(secret)
+    counter = int(time.time()) // 30
+    msg = struct.pack(">Q", counter)
+    h = hmac.new(key, msg, hashlib.sha1).digest()
+    o = h[-1] & 0x0F
+    num = struct.unpack(">I", h[o:o + 4])[0] & 0x7FFFFFFF
+    return str(num % 1000000).zfill(6)
+
+
+class AccountSecurityTests(unittest.TestCase):
+    def test_register_returns_verify_url_and_verify(self):
+        c = Client()
+        status, data = c.register("verify-user@test.local")
+        self.assertEqual(status, 200)
+        self.assertIn("verify_url", data)
+        status, data, _ = c.request("GET", data["verify_url"].replace(_base_url, ""))
+        self.assertEqual(status, 200)
+        status, data, _ = c.request("GET", "/api/session")
+        self.assertTrue(data["user"]["is_verified"])
+
+    def test_verify_url_invalid(self):
+        c = Client()
+        status, data, _ = c.request("GET", "/api/verify-email?token=nope")
+        self.assertEqual(status, 400)
+
+    def test_change_password_flow(self):
+        c = Client()
+        c.register("change-pw@test.local")
+        status, _, _ = c.request("POST", "/api/change-password",
+                                 body={"old_password": "wrong-old", "new_password": "newpass123"})
+        self.assertEqual(status, 400)
+        status, _, _ = c.request("POST", "/api/change-password",
+                                 body={"old_password": "secret123", "new_password": "newpass123"})
+        self.assertEqual(status, 200)
+        # old password must no longer work, new must
+        fresh = Client()
+        self.assertEqual(fresh.login("change-pw@test.local", "secret123")[0], 401)
+        self.assertEqual(fresh.login("change-pw@test.local", "newpass123")[0], 200)
+
+    def test_forgot_and_reset_password(self):
+        c = Client()
+        c.register("reset-user@test.local")
+        status, data, _ = c.request("POST", "/api/forgot-password", body={"email": "reset-user@test.local"})
+        self.assertEqual(status, 200)
+        import sqlite3
+        from db import DB_PATH
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT ev.token FROM email_verifications ev JOIN users u ON u.id = ev.user_id "
+                "WHERE u.email = ? AND ev.purpose = 'reset' ORDER BY ev.id DESC LIMIT 1",
+                ("reset-user@test.local",),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        status, data, _ = c.request("POST", "/api/reset-password",
+                                    body={"token": row[0], "password": "freshpass99"})
+        self.assertEqual(status, 200)
+        fresh = Client()
+        self.assertEqual(fresh.login("reset-user@test.local", "freshpass99")[0], 200)
+
+    def test_2fa_login_flow(self):
+        c = Client()
+        c.register("tfa-user@test.local")
+        status, data, _ = c.request("POST", "/api/tfa/setup")
+        self.assertEqual(status, 200)
+        secret = data["secret"]
+        status, data, _ = c.request("POST", "/api/tfa/verify",
+                                    body={"code": totp_code(secret), "enable": True})
+        self.assertEqual(status, 200)
+        # logout, then login should require second factor
+        c.request("POST", "/api/logout")
+        c.token = None
+        status, data, _ = c.request("POST", "/api/login",
+                                    body={"email": "tfa-user@test.local", "password": "secret123"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("tfa_required"))
+        self.assertIsNone(c.token)
+        login_token = data["login_token"]
+        status, data, headers = c.request("POST", "/api/tfa/login",
+                                          body={"login_token": login_token, "code": totp_code(secret)})
+        self.assertEqual(status, 200)
+        set_cookie = headers.get("Set-Cookie", "")
+        self.assertIn("meblio_session=", set_cookie)
+        c.token = set_cookie.split("meblio_session=", 1)[1].split(";", 1)[0]
+        self.assertIsNotNone(c.token)
+        status, data, _ = c.request("GET", "/api/session")
+        self.assertIsNotNone(data["user"])
+        # wrong code rejected
+        status, data, _ = c.request("POST", "/api/tfa/login",
+                                    body={"login_token": login_token, "code": "000000"})
+        self.assertEqual(status, 400)
+
+
 class AdminAndExportTests(unittest.TestCase):
     def test_admin_endpoints_and_export(self):
         admin = Client()

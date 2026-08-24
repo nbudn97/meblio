@@ -102,6 +102,7 @@ def init_db():
               logo TEXT NOT NULL DEFAULT '',
               password_salt TEXT NOT NULL,
               password_hash TEXT NOT NULL,
+              is_verified INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL
             );
 
@@ -240,6 +241,14 @@ def init_db():
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               token TEXT NOT NULL UNIQUE,
+              purpose TEXT NOT NULL DEFAULT 'verify',
+              expires_at TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_tfa (
+              token TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               expires_at TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
@@ -417,6 +426,15 @@ def init_db():
             for name in REGIONS:
                 conn.execute("INSERT OR IGNORE INTO regions (name) VALUES (?)", (name,))
         purge_expired_sessions(conn)
+
+        def ensure_column(table, column, ddl):
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if column not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+        ensure_column("users", "is_verified", "is_verified INTEGER NOT NULL DEFAULT 0")
+        ensure_column("email_verifications", "purpose", "purpose TEXT NOT NULL DEFAULT 'verify'")
+
         conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
