@@ -1,0 +1,7 @@
+meblio.db
+uploads/
+__pycache__/
+*.pyc
+.env
+cookies*.txt
+.mimocode/

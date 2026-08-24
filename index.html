@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Meblio - площадка для заказчиков и производителей мебели</title>
+    <meta
+      name="description"
+      content="Meblio - рабочая площадка для общения заказчиков мебели и мебельных производств: заказы, отклики, личные кабинеты и чат."
+    >
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="icon" href="/meblio.png" type="image/png">
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#3b82f6">
+    <link rel="apple-touch-icon" href="/meblio.png">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container header-inner">
+        <button class="logo as-button" type="button" data-view="home" aria-label="Meblio">
+          <span class="logo-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" role="img" focusable="false">
+              <rect class="logo-mark-bg" x="2" y="2" width="44" height="44" rx="11"></rect>
+              <path class="logo-panel-left" d="M11 34V14h8l5 9 5-9h8v20h-7V23l-6 10-6-10v11z"></path>
+              <path class="logo-panel-line" d="M16 14h4l4 8 4-8h4"></path>
+              <circle class="logo-handle" cx="36" cy="13" r="3"></circle>
+            </svg>
+          </span>
+          <span class="logo-word">Meblio</span>
+        </button>
+        <nav class="nav" aria-label="Навигация">
+          <button type="button" data-view="home">Главная</button>
+          <button type="button" data-view="market">Заказы</button>
+          <button type="button" data-view="companies">Компании</button>
+          <button type="button" data-view="dashboard">Кабинет</button>
+        </nav>
+        <div class="header-actions" id="headerActions"></div>
+      </div>
+    </header>
+
+    <main id="app"></main>
+
+    <div class="modal" id="authModal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+        <button class="modal-close" type="button" data-close-modal aria-label="Закрыть">x</button>
+        <p class="eyebrow">Вход на площадку</p>
+        <h2 id="authTitle">Создайте кабинет или войдите</h2>
+        <div class="tabs" role="tablist">
+          <button class="tab is-active" type="button" data-auth-tab="login">Вход</button>
+          <button class="tab" type="button" data-auth-tab="register">Регистрация</button>
+        </div>
+        <form class="stack-form" id="loginForm">
+          <label>
+            Email
+            <input name="email" type="email" placeholder="mail@example.ru" required>
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" placeholder="Не короче 6 символов" required>
+          </label>
+          <button class="button button-primary" type="submit">Войти</button>
+          <p class="hint">Демо-вход: client@meblio.ru / client123 или maker@meblio.ru / maker123</p>
+        </form>
+        <form class="stack-form hidden" id="registerForm">
+          <label>
+            Роль
+            <select name="role" required>
+              <option value="client">Заказчик мебели</option>
+              <option value="maker">Производитель мебели</option>
+            </select>
+          </label>
+          <label>
+            Имя или компания
+            <input name="name" type="text" placeholder="Название компании" required>
+          </label>
+          <label>
+            Email
+            <input name="email" type="email" placeholder="mail@example.ru" required>
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" placeholder="Не короче 6 символов" minlength="6" required>
+          </label>
+          <label>
+            Город
+            <input name="city" type="text" placeholder="Москва" required>
+          </label>
+          <label>
+            Регион
+            <select name="region_id" id="registerRegion">
+              <option value="">Выберите регион</option>
+            </select>
+          </label>
+          <label class="maker-only">
+            Тип компании
+            <select name="company_type">
+              <option value="manufacturer">Производитель</option>
+              <option value="designer">Проектировщик</option>
+              <option value="serial">Серийное производство</option>
+              <option value="supplier">Поставщик</option>
+            </select>
+          </label>
+          <label class="maker-only">
+            Компетенции производства
+            <input name="skills" type="text" placeholder="Кухни, шкафы, HoReCa, монтаж">
+          </label>
+          <button class="button button-primary" type="submit">Создать кабинет</button>
+        </form>
+        <p class="form-result" id="authMessage" aria-live="polite"></p>
+      </section>
+    </div>
+
+    <script src="script.js"></script>
+    <script>
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/sw.js").catch(() => {});
+      }
+    </script>
+  </body>
+</html>
