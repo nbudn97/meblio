@@ -111,6 +111,21 @@ def validate_session(token):
         return None
 
 
+def validate_thread_access(user_id, thread_id):
+    """Return True only if user participates in the thread."""
+    if not user_id or not thread_id:
+        return False
+    try:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM threads WHERE id = ? AND (client_id = ? OR maker_id = ?)",
+                (thread_id, user_id, user_id),
+            ).fetchone()
+            return row is not None
+    except Exception:
+        return False
+
+
 class WebSocketHandler(threading.Thread):
     def __init__(self, sock, addr, server):
         super().__init__(daemon=True)
@@ -277,12 +292,23 @@ class WebSocketHandler(threading.Thread):
         elif msg_type == "subscribe" and self.user_id:
             thread_id = msg.get("thread_id")
             if thread_id:
-                ws_manager.subscribe(self.user_id, int(thread_id))
+                try:
+                    thread_id = int(thread_id)
+                except (TypeError, ValueError):
+                    return
+                if validate_thread_access(self.user_id, thread_id):
+                    ws_manager.subscribe(self.user_id, thread_id)
+                else:
+                    self.send_json({"type": "subscribe_error", "thread_id": thread_id, "error": "Нет доступа к переписке"})
 
         elif msg_type == "unsubscribe" and self.user_id:
             thread_id = msg.get("thread_id")
             if thread_id:
-                ws_manager.unsubscribe(self.user_id, int(thread_id))
+                try:
+                    thread_id = int(thread_id)
+                except (TypeError, ValueError):
+                    return
+                ws_manager.unsubscribe(self.user_id, thread_id)
 
         elif msg_type == "ping":
             self.send_json({"type": "pong"})
