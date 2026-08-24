@@ -57,11 +57,19 @@ CLIENT_RATING_RE = re.compile(r"^/api/client-ratings/(\d+)$")
 
 rate_limits = {}
 
+CSRF_EXEMPT_PATHS = {"/api/login", "/api/register", "/api/csrf-token"}
+
 
 def generate_csrf_token(conn, session_token):
     import datetime
+    existing = conn.execute(
+        "SELECT token FROM csrf_tokens WHERE session_token = ? AND expires_at > ?",
+        (session_token, now()),
+    ).fetchone()
+    if existing:
+        return existing["token"]
     token = secrets.token_urlsafe(32)
-    expires = (datetime.datetime.utcnow() + datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    expires = (datetime.datetime.now() + datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("INSERT INTO csrf_tokens (token, session_token, expires_at, created_at) VALUES (?, ?, ?, ?)",
                  (token, session_token, expires, now()))
     conn.execute("DELETE FROM csrf_tokens WHERE expires_at < ?", (now(),))
@@ -71,12 +79,9 @@ def generate_csrf_token(conn, session_token):
 def validate_csrf_token(conn, token, session_token):
     if not token or not session_token:
         return False
-    row = conn.execute("SELECT * FROM csrf_tokens WHERE token = ? AND session_token = ? AND expires_at > ?",
+    row = conn.execute("SELECT 1 FROM csrf_tokens WHERE token = ? AND session_token = ? AND expires_at > ?",
                        (token, session_token, now())).fetchone()
-    if row:
-        conn.execute("DELETE FROM csrf_tokens WHERE token = ?", (token,))
-        return True
-    return False
+    return row is not None
 
 
 def create_notification(conn, user_id, ntype, title, body="", link=""):
@@ -160,6 +165,18 @@ class MeblioHandler(BaseHTTPRequestHandler):
 
     def send_error_json(self, status, message):
         self.send_json(status, {"error": message})
+
+    def check_csrf(self):
+        jar = cookies.SimpleCookie(self.headers.get("Cookie", ""))
+        sess = jar.get("meblio_session")
+        if not sess:
+            return True
+        header_token = self.headers.get("X-CSRF-Token", "")
+        with connect() as conn:
+            if validate_csrf_token(conn, header_token, sess.value):
+                return True
+        self.send_error_json(403, "Недействительный CSRF-токен. Обновите страницу.")
+        return False
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -269,6 +286,8 @@ class MeblioHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/") and path not in CSRF_EXEMPT_PATHS and not self.check_csrf():
+            return
         if path == "/api/register":
             return self.api_register()
         if path == "/api/login":
@@ -342,6 +361,8 @@ class MeblioHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/") and not self.check_csrf():
+            return
         m = SERVICE_ID_RE.match(path)
         if m and path == f"/api/services/{m.group(1)}":
             return self.api_update_service(int(m.group(1)))
@@ -365,6 +386,8 @@ class MeblioHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/") and not self.check_csrf():
+            return
         if path.startswith("/api/notifications/"):
             notif_id = path.split("/")[-1]
             if notif_id == "clear-all":

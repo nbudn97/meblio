@@ -72,14 +72,28 @@ let wsReconnectTimer = null;
 let wsHeartbeatTimer = null;
 
 function api(path, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const baseHeaders = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
+  if (method !== "GET" && csrfToken) baseHeaders["X-CSRF-Token"] = csrfToken;
   return fetch(path, {
     credentials: "same-origin",
-    headers: options.body instanceof FormData ? {} : { "Content-Type": "application/json" },
     ...options,
+    headers: { ...baseHeaders, ...(options.headers || {}) },
   }).then((response) => response.json().catch(() => ({})).then((data) => {
     if (!response.ok) throw new Error(data.error || "Ошибка запроса");
     return data;
   }));
+}
+
+async function ensureCsrfToken() {
+  try {
+    const response = await fetch("/api/csrf-token", { method: "POST", credentials: "same-origin" });
+    const data = await response.json().catch(() => ({}));
+    csrfToken = data.csrf_token || null;
+  } catch {
+    csrfToken = null;
+  }
+  return csrfToken;
 }
 
 function money(value) {
@@ -234,6 +248,7 @@ async function loadSession() {
   const data = await api("/api/session");
   state.user = data.user;
   if (state.user) {
+    await ensureCsrfToken();
     connectWebSocket();
     loadNotifications();
     loadNotifPrefs();
@@ -2553,6 +2568,7 @@ document.addEventListener("click", async (event) => {
       if (ws) { ws.close(); ws = null; }
       if (wsHeartbeatTimer) { clearInterval(wsHeartbeatTimer); wsHeartbeatTimer = null; }
       await api("/api/logout", { method: "POST", body: JSON.stringify({}) });
+      csrfToken = null;
       state.user = null; state.view = "home"; state.dashboardTab = "overview";
       return render();
     }
@@ -3140,6 +3156,8 @@ loginForm.addEventListener("submit", async (event) => {
   authMessage.textContent = "";
   try {
     const result = await api("/api/login", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(loginForm))) });
+    csrfToken = null;
+    await ensureCsrfToken();
     state.user = result.user; state.view = "dashboard"; state.dashboardTab = "overview";
     closeAuth(); await render();
   } catch (error) { authMessage.textContent = error.message; }
@@ -3150,6 +3168,8 @@ registerForm.addEventListener("submit", async (event) => {
   authMessage.textContent = "";
   try {
     const result = await api("/api/register", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(registerForm))) });
+    csrfToken = null;
+    await ensureCsrfToken();
     state.user = result.user; state.view = "dashboard"; state.dashboardTab = "overview";
     closeAuth(); await render();
   } catch (error) { authMessage.textContent = error.message; }
