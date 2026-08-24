@@ -752,7 +752,7 @@ class MeblioHandler(BaseHTTPRequestHandler):
             where.append("region_id = ?")
             values.append(int(region_filter))
         if search:
-            where.append("(LOWER(name) LIKE ? OR LOWER(about) LIKE ?)")
+            where.append("(LOWER(users.name) LIKE ? OR LOWER(about) LIKE ?)")
             values.extend([f"%{search.lower()}%", f"%{search.lower()}%"])
         where_clause = " WHERE " + " AND ".join(where)
         with connect() as conn:
@@ -761,7 +761,7 @@ class MeblioHandler(BaseHTTPRequestHandler):
                 SELECT users.*, regions.name AS region_name
                 FROM users LEFT JOIN regions ON regions.id = users.region_id
                 {where_clause}
-                ORDER BY name
+                ORDER BY users.name
                 LIMIT ? OFFSET ?
             """
             companies = []
