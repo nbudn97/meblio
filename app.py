@@ -564,30 +564,41 @@ class MeblioHandler(BaseHTTPRequestHandler):
         }
 
     def order_payload(self, conn, order):
-        files = rows_to_list(conn.execute("SELECT * FROM order_files WHERE order_id = ? ORDER BY id", (order["id"],)).fetchall())
-        responses = rows_to_list(
-            conn.execute(
-                """
-                SELECT responses.*, users.name AS maker_name, users.city AS maker_city
-                FROM responses JOIN users ON users.id = responses.maker_id
-                WHERE order_id = ? ORDER BY responses.created_at DESC
-                """,
-                (order["id"],),
-            ).fetchall()
-        )
-        data = dict(order)
-        data["files"] = [
-            {
-                "id": file["id"],
-                "name": file["original_name"],
-                "size": file["size"],
-                "mime": file["mime"],
-                "url": f"/uploads/{file['stored_name']}",
-            }
-            for file in files
-        ]
-        data["responses"] = responses
-        return data
+        return self.order_payload_batch(conn, [order])[0]
+
+    def order_payload_batch(self, conn, order_rows):
+        orders = [dict(row) for row in order_rows]
+        if not orders:
+            return []
+        ids = [o["id"] for o in orders]
+        placeholders = ",".join("?" * len(ids))
+        files_by_order = {}
+        for f in conn.execute(
+            f"SELECT * FROM order_files WHERE order_id IN ({placeholders}) ORDER BY id", ids
+        ).fetchall():
+            files_by_order.setdefault(f["order_id"], []).append(
+                {
+                    "id": f["id"],
+                    "name": f["original_name"],
+                    "size": f["size"],
+                    "mime": f["mime"],
+                    "url": f"/uploads/{f['stored_name']}",
+                }
+            )
+        responses_by_order = {}
+        for r in conn.execute(
+            f"""
+            SELECT responses.*, users.name AS maker_name, users.city AS maker_city
+            FROM responses JOIN users ON users.id = responses.maker_id
+            WHERE order_id IN ({placeholders}) ORDER BY responses.created_at DESC
+            """,
+            ids,
+        ).fetchall():
+            responses_by_order.setdefault(r["order_id"], []).append(dict(r))
+        for o in orders:
+            o["files"] = files_by_order.get(o["id"], [])
+            o["responses"] = responses_by_order.get(o["id"], [])
+        return orders
 
     def serve_static(self, filename):
         path = BASE_DIR / filename
@@ -718,7 +729,7 @@ class MeblioHandler(BaseHTTPRequestHandler):
                 ORDER BY orders.created_at DESC
                 LIMIT ? OFFSET ?
             """
-            orders = [self.order_payload(conn, row) for row in conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall()]
+            orders = self.order_payload_batch(conn, conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall())
         self.send_json(200, {"orders": orders, "total": total, "page": page, "page_size": PAGE_SIZE})
 
     def api_makers(self):
@@ -765,11 +776,24 @@ class MeblioHandler(BaseHTTPRequestHandler):
                 LIMIT ? OFFSET ?
             """
             companies = []
-            for row in conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall():
+            company_rows = conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall()
+            company_ids = [row["id"] for row in company_rows]
+            review_stats = {}
+            if company_ids:
+                stat_placeholders = ",".join("?" * len(company_ids))
+                for stat in conn.execute(
+                    f"""
+                    SELECT company_id, AVG(rating) AS avg_rating, COUNT(*) AS reviews_count
+                    FROM reviews WHERE company_id IN ({stat_placeholders}) GROUP BY company_id
+                    """,
+                    company_ids,
+                ).fetchall():
+                    review_stats[stat["company_id"]] = (stat["avg_rating"], stat["reviews_count"])
+            for row in company_rows:
                 company = self.public_user(row_to_dict(row))
-                avg = conn.execute("SELECT AVG(rating) FROM reviews WHERE company_id = ?", (row["id"],)).fetchone()[0]
-                company["avg_rating"] = round(avg, 1) if avg else 0
-                company["reviews_count"] = conn.execute("SELECT COUNT(*) FROM reviews WHERE company_id = ?", (row["id"],)).fetchone()[0]
+                avg_rating, reviews_count = review_stats.get(row["id"], (None, 0))
+                company["avg_rating"] = round(avg_rating, 1) if avg_rating else 0
+                company["reviews_count"] = reviews_count
                 companies.append(company)
         self.send_json(200, {"companies": companies, "total": total, "page": page, "page_size": PAGE_SIZE})
 
