@@ -58,6 +58,19 @@ def now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+SESSION_TTL_DAYS = 14
+
+
+def session_cutoff():
+    import datetime
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=SESSION_TTL_DAYS)
+    return cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def purge_expired_sessions(conn):
+    conn.execute("DELETE FROM sessions WHERE created_at < ?", (session_cutoff(),))
+
+
 def init_db():
     UPLOAD_DIR.mkdir(exist_ok=True)
     with connect() as conn:
@@ -397,6 +410,7 @@ def init_db():
         if existing_regions == 0:
             for name in REGIONS:
                 conn.execute("INSERT OR IGNORE INTO regions (name) VALUES (?)", (name,))
+        purge_expired_sessions(conn)
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             seed(conn)

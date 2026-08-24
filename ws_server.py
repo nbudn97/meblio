@@ -9,7 +9,7 @@ import json
 import time
 from http.cookies import SimpleCookie
 
-from db import connect, row_to_dict
+from db import connect, row_to_dict, session_cutoff
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-5AB9B0054F03"
 OPCODE_TEXT = 0x1
@@ -103,8 +103,8 @@ def validate_session(token):
     try:
         with connect() as conn:
             row = conn.execute(
-                "SELECT users.* FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ?",
-                (token,),
+                "SELECT users.* FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ? AND sessions.created_at >= ?",
+                (token, session_cutoff()),
             ).fetchone()
             return row_to_dict(row) if row else None
     except Exception:

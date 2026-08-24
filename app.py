@@ -20,6 +20,8 @@ from db import (
     row_to_dict,
     rows_to_list,
     now,
+    session_cutoff,
+    purge_expired_sessions,
     init_db,
     create_user,
     ensure_thread,
@@ -502,9 +504,9 @@ class MeblioHandler(BaseHTTPRequestHandler):
             SELECT users.*, regions.name AS region_name FROM users
             LEFT JOIN regions ON regions.id = users.region_id
             JOIN sessions ON sessions.user_id = users.id
-            WHERE sessions.token = ?
+            WHERE sessions.token = ? AND sessions.created_at >= ?
             """,
-            (token.value,),
+            (token.value, session_cutoff()),
         ).fetchone()
         return row_to_dict(row)
 
@@ -634,6 +636,7 @@ class MeblioHandler(BaseHTTPRequestHandler):
                     region_id=region_id,
                 )
                 token = secrets.token_urlsafe(32)
+                purge_expired_sessions(conn)
                 conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user_id, now()))
                 user = conn.execute("SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE users.id = ?", (user_id,)).fetchone()
             self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure"})
@@ -654,6 +657,7 @@ class MeblioHandler(BaseHTTPRequestHandler):
                 if not user or not verify_password(data.get("password", ""), user["password_salt"], user["password_hash"]):
                     return self.send_error_json(401, "Неверный email или пароль")
                 token = secrets.token_urlsafe(32)
+                purge_expired_sessions(conn)
                 conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], now()))
             self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure"})
         except Exception as exc:
@@ -2163,7 +2167,7 @@ class MeblioHandler(BaseHTTPRequestHandler):
             import hashlib as _hl
             import time as _t
             token = secrets.token_urlsafe(48)
-            expires = (datetime.datetime.utcnow() + datetime.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+            expires = (datetime.datetime.now() + datetime.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
             conn.execute("INSERT INTO api_tokens (user_id, token, name, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
                          (user["id"], token, data.get("name", "mobile"), expires, now()))
         self.send_json(200, {"token": token, "expires_at": expires})
