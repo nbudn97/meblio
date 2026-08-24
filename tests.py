@@ -1,0 +1,336 @@
+"""Meblio test suite (stdlib only). Run: python -m unittest tests -v"""
+import io
+import json
+import os
+import secrets
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
+from urllib.parse import quote
+
+_TMP = tempfile.mkdtemp(prefix="meblio-test-")
+os.environ["MEBLIO_DB"] = os.path.join(_TMP, "test.db")
+os.environ["MEBLIO_UPLOADS"] = os.path.join(_TMP, "uploads")
+
+from db import init_db  # noqa: E402  (env must be set before import)
+import app as app_module  # noqa: E402
+from ws_server import validate_session, validate_thread_access  # noqa: E402
+
+_server = None
+_base_url = None
+
+
+def setUpModule():
+    global _server, _base_url
+    init_db()
+    app_module.check_rate_limit = lambda *args, **kwargs: True  # tests create many users fast
+    _server = ThreadingHTTPServer(("127.0.0.1", 0), app_module.MeblioHandler)
+    _base_url = f"http://127.0.0.1:{_server.server_address[1]}"
+    threading.Thread(target=_server.serve_forever, daemon=True).start()
+
+
+def tearDownModule():
+    if _server:
+        _server.shutdown()
+
+
+class Client:
+    """Tiny HTTP helper with manual session-cookie handling."""
+
+    def __init__(self):
+        self.token = None
+        self.csrf = None
+
+    def request(self, method, path, body=None, headers=None, raw_body=None):
+        url = _base_url + quote(path, safe="/?&=")
+        data = raw_body
+        req_headers = dict(headers or {})
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+        if self.token:
+            req_headers.setdefault("Cookie", f"meblio_session={self.token}")
+        if self.csrf and method not in ("GET", "HEAD"):
+            req_headers.setdefault("X-CSRF-Token", self.csrf)
+        req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
+        try:
+            resp = urllib.request.urlopen(req, timeout=10)
+            status = resp.status
+            payload = resp.read()
+            resp_headers = dict(resp.headers)
+        except urllib.error.HTTPError as err:
+            status = err.code
+            payload = err.read()
+            resp_headers = dict(err.headers)
+            err.close()
+        parsed = {}
+        if payload:
+            try:
+                parsed = json.loads(payload.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                parsed = {"_raw": payload}
+        return status, parsed, resp_headers
+
+    def _after_auth(self, headers):
+        set_cookie = headers.get("Set-Cookie", "")
+        if "meblio_session=" in set_cookie:
+            self.token = set_cookie.split("meblio_session=", 1)[1].split(";", 1)[0]
+            if self.token:
+                self.fetch_csrf()
+
+    def register(self, email, password="secret123", role="client", name="Test Co"):
+        status, data, headers = self.request(
+            "POST", "/api/register",
+            body={"role": role, "name": name, "email": email,
+                  "password": password, "city": "Москва"},
+        )
+        self._after_auth(headers)
+        return status, data
+
+    def login(self, email, password):
+        status, data, headers = self.request(
+            "POST", "/api/login", body={"email": email, "password": password},
+        )
+        self._after_auth(headers)
+        return status, data
+
+    def fetch_csrf(self):
+        status, data, _ = self.request("POST", "/api/csrf-token")
+        self.csrf = data.get("csrf_token")
+        return status, self.csrf
+
+
+def make_multipart(fields, files):
+    boundary = "----mebliotest" + secrets.token_hex(8)
+    buf = io.BytesIO()
+    for name, value in fields.items():
+        buf.write(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode("utf-8"))
+    for field, filename, content, mime in files:
+        buf.write(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n".encode("utf-8"))
+        buf.write(content)
+        buf.write(b"\r\n")
+    buf.write(f"--{boundary}--\r\n".encode("utf-8"))
+    return buf.getvalue(), f"multipart/form-data; boundary={boundary}"
+
+
+class AuthTests(unittest.TestCase):
+    def test_anonymous_session_is_none(self):
+        c = Client()
+        status, data, _ = c.request("GET", "/api/session")
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["user"])
+
+    def test_register_login_logout(self):
+        c = Client()
+        status, data = c.register("auth-user@test.local")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(c.token)
+        self.assertEqual(data["user"]["role"], "client")
+
+        dup = Client()
+        status, _ = dup.register("auth-user@test.local")
+        self.assertEqual(status, 409)
+
+        c.fetch_csrf()
+        status, _, _ = c.request("POST", "/api/logout")
+        self.assertEqual(status, 200)
+        status, data, _ = c.request("GET", "/api/session")
+        self.assertIsNone(data["user"])
+
+    def test_login_wrong_password(self):
+        c = Client()
+        status, _ = c.login("client@meblio.ru", "wrong-password")
+        self.assertEqual(status, 401)
+
+
+class CsrfTests(unittest.TestCase):
+    def test_post_without_csrf_rejected(self):
+        c = Client()
+        c.register("csrf-user@test.local")
+        saved_token, saved_csrf = c.token, c.csrf
+        c.csrf = None
+        fields = {"title": "T", "type": "T", "quantity": "1", "city": "Москва",
+                  "budget": "100", "deadline": "5 дней", "details": "d"}
+        body, ctype = make_multipart(fields, [])
+        status, _, _ = c.request("POST", "/api/orders", raw_body=body,
+                                 headers={"Content-Type": ctype})
+        self.assertEqual(status, 403)
+        c.token, c.csrf = saved_token, saved_csrf
+
+    def test_post_with_csrf_accepted_and_reusable(self):
+        c = Client()
+        c.register("csrf-ok@test.local")
+        status, csrf = c.fetch_csrf()
+        self.assertEqual(status, 200)
+        fields = {"title": "CSRF OK", "type": "Кухни", "quantity": "1",
+                  "city": "Москва", "budget": "500", "deadline": "3 дня", "details": "x"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = c.request("POST", "/api/orders", raw_body=body,
+                                    headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        order_id = data["order"]["id"]
+
+        status, _, _ = c.request("POST", "/api/notifications/read-all", body={})
+        self.assertEqual(status, 200)
+
+        status, data, _ = c.request("GET", f"/api/orders?city=Москва")
+        match = [o for o in data["orders"] if o["id"] == order_id]
+        self.assertEqual(len(match), 1)
+        self.assertEqual(match[0]["title"], "CSRF OK")
+
+    def test_bad_csrf_rejected(self):
+        c = Client()
+        c.register("csrf-bad@test.local")
+        c.csrf = "definitely-wrong"
+        status, _, _ = c.request("POST", "/api/notifications/read-all", body={})
+        self.assertEqual(status, 403)
+
+
+class OrderFlowTests(unittest.TestCase):
+    def test_full_order_lifecycle(self):
+        client = Client()
+        client.register("flow-client@test.local", name="Flow Client")
+        maker = Client()
+        maker.register("flow-maker@test.local", role="maker", name="Flow Maker")
+
+        fields = {"title": "Кухни для кафе", "type": "Кухни и шкафы", "quantity": "5",
+                  "city": "Москва", "budget": "900000", "deadline": "30 дней", "details": "ЛДСП"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = client.request("POST", "/api/orders", raw_body=body,
+                                         headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        order_id = data["order"]["id"]
+        self.assertEqual(data["order"]["status"], "open")
+
+        status, data, _ = maker.request("POST", f"/api/orders/{order_id}/responses",
+                                        body={"price": 850000, "days": 28, "message": "Готовы"})
+        self.assertEqual(status, 200)
+
+        status, data, _ = client.request("GET", "/api/threads")
+        self.assertEqual(status, 200)
+        thread = next(t for t in data["threads"] if t["order_id"] == order_id)
+
+        outsider = Client()
+        outsider.register("flow-outsider@test.local")
+        status, _, _ = outsider.request("GET", f"/api/threads/{thread['id']}/messages")
+        self.assertEqual(status, 403)
+
+        status, _, _ = maker.request("POST", f"/api/threads/{thread['id']}/messages",
+                                     body={"body": "Уточним фурнитуру"})
+        self.assertEqual(status, 200)
+        status, data, _ = client.request("GET", f"/api/threads/{thread['id']}/messages")
+        self.assertTrue(any(m["body"] == "Уточним фурнитуру" for m in data["messages"]))
+
+        status, data, _ = client.request("GET", "/api/orders?city=Москва")
+        target = next(o for o in data["orders"] if o["id"] == order_id)
+        self.assertEqual(target["responses"][0]["maker_name"], "Flow Maker")
+
+        maker_id = target["responses"][0]["maker_id"]
+        status, _, _ = client.request("POST", f"/api/orders/{order_id}/choose",
+                                      body={"maker_id": maker_id})
+        self.assertEqual(status, 200)
+        status, data, _ = client.request("GET", "/api/orders?status=progress")
+        self.assertTrue(any(o["id"] == order_id for o in data["orders"]))
+
+
+class UploadWhitelistTests(unittest.TestCase):
+    def test_html_rejected_png_accepted(self):
+        c = Client()
+        c.register("upload-user@test.local")
+        base_fields = {"title": "Upload", "type": "Тест", "quantity": "1",
+                       "city": "Москва", "budget": "100", "deadline": "2 дня"}
+
+        html = b"<html><script>alert(1)</script></html>"
+        body, ctype = make_multipart(base_fields, [("files", "evil.html", html, "text/html")])
+        status, data, _ = c.request("POST", "/api/orders", raw_body=body,
+                                    headers={"Content-Type": ctype})
+        self.assertEqual(status, 400)
+        self.assertIn("не разрешён", data["error"])
+
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+            "01f15c4890000000d49444154789c626001000000ffff030000060005"
+            "57bfabd40000000049454e44ae426082"
+        )
+        body, ctype = make_multipart(base_fields, [("files", "ok.png", png, "image/png")])
+        status, data, _ = c.request("POST", "/api/orders", raw_body=body,
+                                    headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["order"]["files"][0]["name"], "ok.png")
+
+
+class SessionTtlTests(unittest.TestCase):
+    def test_expired_session_invalidated(self):
+        import sqlite3
+        from db import DB_PATH
+        c = Client()
+        c.register("ttl-user@test.local")
+        status, data, _ = c.request("GET", "/api/session")
+        self.assertIsNotNone(data["user"])
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE sessions SET created_at = '2026-01-01 00:00:00' WHERE token = ?",
+                     (c.token,))
+        conn.commit()
+        conn.close()
+
+        status, data, _ = c.request("GET", "/api/session")
+        self.assertIsNone(data["user"])
+        self.assertIsNone(validate_session(c.token))
+
+
+class WsAuthzTests(unittest.TestCase):
+    def test_thread_access_validation(self):
+        from db import connect
+        with connect() as conn:
+            thread = conn.execute("SELECT id, client_id, maker_id FROM threads LIMIT 1").fetchone()
+            self.assertIsNotNone(thread)
+            self.assertTrue(validate_thread_access(thread["client_id"], thread["id"]))
+            self.assertTrue(validate_thread_access(thread["maker_id"], thread["id"]))
+            outsider_id = thread["maker_id"] + 777
+            self.assertFalse(validate_thread_access(outsider_id, thread["id"]))
+            self.assertFalse(validate_thread_access(None, thread["id"]))
+            self.assertFalse(validate_thread_access(thread["client_id"], 999999))
+
+    def test_validate_session_garbage(self):
+        self.assertIsNone(validate_session(""))
+        self.assertIsNone(validate_session("not-a-real-token"))
+
+
+class AdminAndExportTests(unittest.TestCase):
+    def test_admin_endpoints_and_export(self):
+        admin = Client()
+        status, data = admin.login("admin@meblio.ru", "admin123")
+        self.assertEqual(status, 200)
+        status, data, _ = admin.request("GET", "/api/admin/stats")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(data["users"], 4)
+        status, data, _ = admin.request("GET", "/api/admin/analytics")
+        self.assertEqual(status, 200)
+        self.assertIn("by_status", data)
+
+        anon = Client()
+        status, _, _ = anon.request("GET", "/api/admin/stats")
+        self.assertEqual(status, 401)
+
+        owner = Client()
+        owner.register("export-user@test.local")
+        fields = {"title": "=cmd() injection attempt", "type": "Тест", "quantity": "1",
+                  "city": "Москва", "budget": "42", "deadline": "1 день", "details": "csv"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = owner.request("POST", "/api/orders", raw_body=body,
+                                        headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        status, payload, headers = owner.request("POST", "/api/export/excel")
+        self.assertEqual(status, 200)
+        raw = payload["_raw"].decode("utf-8")
+        self.assertTrue(raw.startswith("\ufeff"))
+        self.assertIn("'=cmd() injection attempt", raw.replace('""', ""))
+        self.assertIn("attachment", headers.get("Content-Disposition", ""))
+
+
+if __name__ == "__main__":
+    unittest.main()

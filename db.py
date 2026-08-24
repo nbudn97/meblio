@@ -1,13 +1,14 @@
 import hashlib
 import hmac
+import os
 import secrets
 import sqlite3
 import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "meblio.db"
-UPLOAD_DIR = BASE_DIR / "uploads"
+DB_PATH = Path(os.environ.get("MEBLIO_DB", BASE_DIR / "meblio.db"))
+UPLOAD_DIR = Path(os.environ.get("MEBLIO_UPLOADS", BASE_DIR / "uploads"))
 
 COMPANY_TYPES = [
     ("client", "Заказчик"),
@@ -32,6 +33,9 @@ def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # Built-in LOWER()/UPPER() are ASCII-only in SQLite; override with Unicode-aware versions
+    conn.create_function("LOWER", 1, lambda s: s.lower() if isinstance(s, str) else s)
+    conn.create_function("UPPER", 1, lambda s: s.upper() if isinstance(s, str) else s)
     return conn
 
 
