@@ -444,6 +444,98 @@ class AccountSecurityTests(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+class DealAndModerationTests(unittest.TestCase):
+    def _make_closed_deal(self):
+        client = Client()
+        client.register("deal-client@test.local", name="Deal Client")
+        maker = Client()
+        maker.register("deal-maker@test.local", role="maker", name="Deal Maker")
+        fields = {"title": "Дельная сделка", "type": "Кухни", "quantity": "1",
+                  "city": "Москва", "budget": "100000", "deadline": "10 дней", "details": "x"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = client.request("POST", "/api/orders", raw_body=body,
+                                         headers={"Content-Type": ctype})
+        order_id = data["order"]["id"]
+        status, _, _ = maker.request("POST", f"/api/orders/{order_id}/responses",
+                                     body={"price": 90000, "days": 9, "message": "ok"})
+        status, data, _ = client.request("GET", "/api/orders?status=open")
+        target = next(o for o in data["orders"] if o["id"] == order_id)
+        maker_id = target["responses"][0]["maker_id"]
+        client.request("POST", f"/api/orders/{order_id}/choose", body={"maker_id": maker_id})
+        admin = Client()
+        admin.login("admin@meblio.ru", "admin123")
+        admin.request("POST", "/api/admin/orders/status",
+                      body={"order_id": order_id, "status": "closed"})
+        return client, maker, order_id, maker_id
+
+    def test_review_only_for_closed_deal(self):
+        client, maker, order_id, maker_id = self._make_closed_deal()
+        status, _, _ = client.request("POST", "/api/reviews",
+                                      body={"company_id": maker_id, "order_id": order_id, "rating": 5, "text": "отлично"})
+        self.assertEqual(status, 200)
+        outsider = Client()
+        outsider.register("deal-outsider@test.local")
+        status, data, _ = outsider.request("POST", "/api/reviews",
+                                           body={"company_id": maker_id, "order_id": order_id, "rating": 1, "text": "спам"})
+        self.assertEqual(status, 403)
+        # review without closed deal also rejected
+        fresh = Client()
+        fresh.register("deal-fresh@test.local")
+        status, data, _ = fresh.request("POST", "/api/reviews",
+                                        body={"company_id": maker_id, "rating": 5, "text": "нет сделки"})
+        self.assertEqual(status, 403)
+
+    def test_cancel_order_permissions(self):
+        client = Client()
+        client.register("cancel-owner@test.local")
+        fields = {"title": "Отменяемый", "type": "Тест", "quantity": "1",
+                  "city": "Москва", "budget": "5000", "deadline": "5 дней", "details": "x"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = client.request("POST", "/api/orders", raw_body=body,
+                                         headers={"Content-Type": ctype})
+        order_id = data["order"]["id"]
+        stranger = Client()
+        stranger.register("cancel-stranger@test.local")
+        status, _, _ = stranger.request("POST", f"/api/orders/{order_id}/cancel", body={})
+        self.assertEqual(status, 403)
+        status, _, _ = client.request("POST", f"/api/orders/{order_id}/cancel", body={})
+        self.assertEqual(status, 200)
+        status, data, _ = client.request("GET", "/api/orders?status=cancelled")
+        self.assertTrue(any(o["id"] == order_id for o in data["orders"]))
+
+    def test_report_flow(self):
+        reporter = Client()
+        reporter.register("report-user@test.local")
+        status, data, _ = reporter.request("POST", "/api/reports",
+                                           body={"target_type": "order", "target_id": 1, "reason": "Мусорный заказ"})
+        self.assertEqual(status, 200)
+        status, _, _ = reporter.request("POST", "/api/reports",
+                                        body={"target_type": "order", "target_id": 1, "reason": ""})
+        self.assertEqual(status, 400)
+        admin = Client()
+        admin.login("admin@meblio.ru", "admin123")
+        status, data, _ = admin.request("GET", "/api/admin/reports")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(r["reason"] == "Мусорный заказ" for r in data["reports"]))
+        report_id = next(r["id"] for r in data["reports"] if r["reason"] == "Мусорный заказ")
+        status, _, _ = admin.request("POST", f"/api/admin/reports/{report_id}/resolve",
+                                     body={"status": "resolved"})
+        self.assertEqual(status, 200)
+
+    def test_contacts_hidden_until_participation(self):
+        anon = Client()
+        status, data, _ = anon.request("GET", "/api/companies")
+        self.assertEqual(status, 200)
+        company = next(c for c in data["companies"] if c["name"] == "Modul Pro")
+        self.assertEqual(company["email"], "")
+        self.assertEqual(company["phone"], "")
+        maker = Client()
+        maker.login("maker@meblio.ru", "maker123")
+        status, data, _ = maker.request("GET", f"/api/companies/{company['id']}")
+        self.assertEqual(status, 200)
+        self.assertNotEqual(data["company"]["email"], "")
+
+
 class AdminAndExportTests(unittest.TestCase):
     def test_admin_endpoints_and_export(self):
         admin = Client()

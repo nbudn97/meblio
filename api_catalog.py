@@ -460,6 +460,9 @@ class CatalogMixin:
                 text = data.get("text", "").strip()
                 if rating < 1 or rating > 5:
                     return self.send_error_json(400, "Рейтинг от 1 до 5")
+                order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+                if not order or order["status"] != "closed" or order["selected_maker_id"] != user["id"] or order["client_id"] != client_id:
+                    return self.send_error_json(403, "Оценить заказчика можно только по завершённому заказу")
                 conn.execute(
                     "INSERT INTO client_ratings (order_id, maker_id, client_id, rating, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (order_id, user["id"], client_id, rating, text, now()),

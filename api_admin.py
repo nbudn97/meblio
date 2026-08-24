@@ -143,7 +143,7 @@ class AdminMixin:
                 """
                 SELECT admin_activity.*, users.name AS admin_name
                 FROM admin_activity JOIN users ON users.id = admin_activity.admin_id
-                ORDER BY admin_activity.created_at DESC LIMIT ? OFFSET ?
+                ORDER BY admin_activity.created_at DESC, admin_activity.id DESC LIMIT ? OFFSET ?
                 """,
                 (PAGE_SIZE, offset),
             ).fetchall())
@@ -208,7 +208,7 @@ class AdminMixin:
                        users.phone, users.created_at, regions.name AS region_name
                 FROM users LEFT JOIN regions ON regions.id = users.region_id
                 {where_clause}
-                ORDER BY users.created_at DESC
+                ORDER BY users.created_at DESC, users.id DESC
                 LIMIT ? OFFSET ?
             """
             users = rows_to_list(conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall())
@@ -291,7 +291,7 @@ class AdminMixin:
                 JOIN users clients ON clients.id = orders.client_id
                 LEFT JOIN users makers ON makers.id = orders.selected_maker_id
                 {where_clause}
-                ORDER BY orders.created_at DESC
+                ORDER BY orders.created_at DESC, orders.id DESC
                 LIMIT ? OFFSET ?
             """
             orders = rows_to_list(conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall())
@@ -319,7 +319,7 @@ class AdminMixin:
         data = self.read_json()
         order_id = int(data.get("order_id", 0))
         status = data.get("status", "")
-        if status not in ("open", "progress", "closed"):
+        if status not in ("open", "progress", "closed", "cancelled"):
             return self.send_error_json(400, "Некорректный статус")
         with connect() as conn:
             admin = self.require_admin(conn)
@@ -368,7 +368,7 @@ class AdminMixin:
                 SELECT services.*, users.name AS company_name, users.city AS company_city
                 FROM services JOIN users ON users.id = services.user_id
                 {where_clause}
-                ORDER BY services.created_at DESC
+                ORDER BY services.created_at DESC, services.id DESC
                 LIMIT ? OFFSET ?
             """
             services = rows_to_list(conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall())
@@ -422,7 +422,7 @@ class AdminMixin:
                     self.log_admin_activity(conn, admin["id"], "delete_order", "order", oid, f"Массовое удаление заказа #{oid}")
             elif action == "status":
                 status = data.get("status", "")
-                if status not in ("open", "progress", "closed"):
+                if status not in ("open", "progress", "closed", "cancelled"):
                     return self.send_error_json(400, "Некорректный статус")
                 for oid in ids:
                     conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, int(oid)))
@@ -457,3 +457,50 @@ class AdminMixin:
                     conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, int(uid)))
                     self.log_admin_activity(conn, admin["id"], "update_user", "user", int(uid), f"Массовая смена роли #{uid} -> {role}")
         self.send_json(200, {"ok": True, "affected": len(ids)})
+    # --- Reports moderation ---
+    def api_admin_reports(self, query):
+        params = parse_qs(query)
+        status_filter = params.get("status", [""])[0]
+        page = max(1, int(params.get("page", ["1"])[0]))
+        offset = (page - 1) * PAGE_SIZE
+        where = []
+        values = []
+        if status_filter:
+            where.append("reports.status = ?")
+            values.append(status_filter)
+        where_clause = (" WHERE " + " AND ".join(where)) if where else ""
+        with connect() as conn:
+            admin = self.require_admin(conn)
+            if not admin:
+                return
+            total = conn.execute(f"SELECT COUNT(*) FROM reports{where_clause}", values).fetchone()[0]
+            rows = rows_to_list(conn.execute(
+                f"""
+                SELECT reports.*, users.name AS reporter_name
+                FROM reports JOIN users ON users.id = reports.reporter_id
+                {where_clause}
+                ORDER BY reports.created_at DESC, reports.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                values + [PAGE_SIZE, offset],
+            ).fetchall())
+        self.send_json(200, {"reports": rows, "total": total, "page": page, "page_size": PAGE_SIZE})
+
+    def api_admin_report_resolve(self, report_id):
+        data = self.read_json()
+        status = data.get("status", "resolved")
+        if status not in ("resolved", "rejected"):
+            return self.send_error_json(400, "Некорректный статус")
+        with connect() as conn:
+            admin = self.require_admin(conn)
+            if not admin:
+                return
+            cur = conn.execute(
+                "UPDATE reports SET status = ? WHERE id = ? AND status = 'pending'",
+                (status, report_id),
+            )
+            if cur.rowcount == 0:
+                return self.send_error_json(404, "Жалоба не найдена или уже обработана")
+            self.log_admin_activity(conn, admin["id"], "resolve_report", "report", report_id,
+                                    f"Жалоба #{report_id} -> {status}")
+        self.send_json(200, {"ok": True})

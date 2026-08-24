@@ -135,7 +135,7 @@ function companyTypeLabel(type) {
 }
 
 function statusLabel(status) {
-  return { open: "Открыт", progress: "В работе", closed: "Завершен" }[status] || status;
+  return { open: "Открыт", progress: "В работе", closed: "Завершен", cancelled: "Отменён" }[status] || status;
 }
 
 function statusClass(status) { return `status status-${status}`; }
@@ -664,9 +664,11 @@ function orderCard(order, showActions = true) {
         ${canRespond ? `<button class="button button-primary button-small" type="button" data-respond="${order.id}">Откликнуться</button>` : ""}
         ${canChat ? `<button class="button button-secondary button-small" type="button" data-open-chat="${order.id}">Открыть чат</button>` : ""}
         ${canChoose ? `<button class="button button-secondary button-small" type="button" data-scroll-responses="${order.id}">Отклики: ${order.responses?.length || 0}</button>` : ""}
+        ${(user?.id === order.client_id && (order.status === "open" || order.status === "progress")) ? `<button class="button button-secondary button-small" type="button" data-cancel-order="${order.id}">Отменить</button>` : ""}
         <button class="button button-secondary button-small" type="button" data-export-order="${order.id}" title="Экспорт в PDF">📥</button>
         <button class="button button-secondary button-small" type="button" data-delivery-history="${order.id}" title="Доставка">🚚</button>
         <button class="button button-secondary button-small" type="button" data-order-history="${order.id}" title="История">📋</button>
+        <button class="button button-secondary button-small" type="button" data-report-order="${order.id}" title="Пожаловаться">⚠</button>
       </div>` : ""}
     </article>`;
 }
@@ -2828,6 +2830,25 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.exportOrder) {
       const order = state.orders.find(o => o.id === Number(target.dataset.exportOrder));
       if (order) exportOrderHTML(order);
+      return;
+    }
+    if (target.dataset.cancelOrder) {
+      const orderId = Number(target.dataset.cancelOrder);
+      if (confirm("Отменить заказ? Это действие нельзя отменить.")) {
+        await api(`/api/orders/${orderId}/cancel`, { method: "POST", body: JSON.stringify({}) });
+        showToast("Заказ отменён", "success");
+        await refreshData();
+        return render();
+      }
+    }
+    if (target.dataset.reportOrder) {
+      const orderId = Number(target.dataset.reportOrder);
+      const reason = prompt("Причина жалобы (обязательно):");
+      if (!reason) return;
+      try {
+        await api("/api/reports", { method: "POST", body: JSON.stringify({ target_type: "order", target_id: orderId, reason }) });
+        showToast("Жалоба отправлена модератору", "success");
+      } catch (error) { showToast(error.message); }
       return;
     }
     if (target.dataset.notifLink) {

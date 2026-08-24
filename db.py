@@ -4,6 +4,7 @@ import os
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -29,7 +30,7 @@ REGIONS = [
 ]
 
 
-def connect():
+def _open_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -39,6 +40,20 @@ def connect():
     conn.create_function("LOWER", 1, lambda s: s.lower() if isinstance(s, str) else s)
     conn.create_function("UPPER", 1, lambda s: s.upper() if isinstance(s, str) else s)
     return conn
+
+
+@contextmanager
+def connect():
+    """Connection as a context manager: commits on success, rolls back on error, always closes."""
+    conn = _open_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def hash_password(password, salt=None):
@@ -250,6 +265,16 @@ def init_db():
               token TEXT PRIMARY KEY,
               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               expires_at TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS reports (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              reporter_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              target_type TEXT NOT NULL,
+              target_id INTEGER NOT NULL,
+              reason TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'pending',
               created_at TEXT NOT NULL
             );
 

@@ -85,6 +85,7 @@ SUPPLIER_RE = re.compile(r"^/api/suppliers/(\d+)$")
 CERTIFICATE_RE = re.compile(r"^/api/certificates/(\d+)$")
 TIMEENTRY_RE = re.compile(r"^/api/time-entries/(\d+)$")
 CLIENT_RATING_RE = re.compile(r"^/api/client-ratings/(\d+)$")
+ADMIN_REPORT_RE = re.compile(r"^/api/admin/reports/(\d+)/resolve$")
 
 CSRF_EXEMPT_PATHS = {"/api/login", "/api/register", "/api/csrf-token", "/api/tfa/login"}
 
@@ -305,6 +306,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         m = ADMIN_SERVICE_RE.match(path)
         if m:
             return self.api_admin_service_detail(int(m.group(1)))
+        if path == "/api/admin/reports":
+            return self.api_admin_reports(parsed.query)
         if path.startswith("/uploads/"):
             return self.serve_upload(path)
         if path in STATIC_FILES:
@@ -385,6 +388,13 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 return self.api_create_response(order_id)
             if path.endswith("/choose"):
                 return self.api_choose_maker(order_id)
+            if path.endswith("/cancel"):
+                return self.api_cancel_order(order_id)
+        if path == "/api/reports":
+            return self.api_create_report()
+        m = ADMIN_REPORT_RE.match(path)
+        if m:
+            return self.api_admin_report_resolve(int(m.group(1)))
         m = THREAD_ID_RE.match(path)
         if m and path.endswith("/messages"):
             return self.api_send_message(int(m.group(1)))
@@ -545,19 +555,17 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return None
         return user
 
-    def public_user(self, user):
+    def public_user(self, user, include_contacts=True):
         if not user:
             return None
-        return {
+        data = {
             "id": user["id"],
             "role": user["role"],
             "company_type": user["company_type"],
             "name": user["name"],
-            "email": user["email"],
             "city": user["city"],
             "region_id": user["region_id"],
             "region_name": user.get("region_name", ""),
-            "phone": user["phone"],
             "about": user["about"],
             "skills": [item.strip() for item in user["skills"].split(",") if item.strip()],
             "capacity": user["capacity"],
@@ -565,6 +573,34 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             "is_verified": bool(user.get("is_verified")),
             "created_at": user["created_at"],
         }
+        if include_contacts:
+            data["email"] = user["email"]
+            data["phone"] = user["phone"]
+        else:
+            data["email"] = ""
+            data["phone"] = ""
+        return data
+
+    def contacts_visible(self, conn, viewer_id, company_id):
+        """Contacts of a company are visible to participants of deals/threads and admins."""
+        if not viewer_id:
+            return False
+        if viewer_id == company_id:
+            return True
+        viewer = conn.execute("SELECT role FROM users WHERE id = ?", (viewer_id,)).fetchone()
+        if viewer and viewer["role"] == "admin":
+            return True
+        row = conn.execute(
+            "SELECT 1 FROM threads WHERE (client_id = ? AND maker_id = ?) OR (client_id = ? AND maker_id = ?) LIMIT 1",
+            (viewer_id, company_id, company_id, viewer_id),
+        ).fetchone()
+        if row:
+            return True
+        row = conn.execute(
+            "SELECT 1 FROM orders WHERE client_id = ? AND selected_maker_id = ? LIMIT 1",
+            (viewer_id, company_id),
+        ).fetchone()
+        return row is not None
 
     def order_payload(self, conn, order):
         return self.order_payload_batch(conn, [order])[0]
@@ -812,7 +848,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 ).fetchall():
                     review_stats[stat["company_id"]] = (stat["avg_rating"], stat["reviews_count"])
             for row in company_rows:
-                company = self.public_user(row_to_dict(row))
+                company = self.public_user(row_to_dict(row), include_contacts=False)
                 avg_rating, reviews_count = review_stats.get(row["id"], (None, 0))
                 company["avg_rating"] = round(avg_rating, 1) if avg_rating else 0
                 company["reviews_count"] = reviews_count
@@ -837,7 +873,9 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 "SELECT id, original_name, doc_type, size FROM company_documents WHERE user_id = ? ORDER BY created_at DESC",
                 (company_id,),
             ).fetchall())
-        data = self.public_user(row_to_dict(user))
+            viewer = self.current_user(conn)
+            include_contacts = self.contacts_visible(conn, viewer["id"] if viewer else None, company_id)
+        data = self.public_user(row_to_dict(user), include_contacts=include_contacts)
         data["services"] = services
         data["gallery"] = [{"id": g["id"], "name": g["original_name"], "url": f"/uploads/{g['stored_name']}"} for g in gallery]
         data["orders_count"] = orders_count
@@ -947,6 +985,47 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             create_notification(conn, maker_id, "chosen",
                 "Вы выбраны исполнителем", f"{user['name']} выбрал вас для заказа: {order['title']}",
                 f"/order/{order_id}")
+        self.send_json(200, {"ok": True})
+
+    def api_cancel_order(self, order_id):
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+            if not order:
+                return self.send_error_json(404, "Заказ не найден")
+            if user["role"] != "admin" and order["client_id"] != user["id"]:
+                return self.send_error_json(403, "Отменить заказ может только заказчик")
+            if order["status"] not in ("open", "progress"):
+                return self.send_error_json(400, "Заказ уже нельзя отменить")
+            conn.execute("UPDATE orders SET status = 'cancelled' WHERE id = ?", (order_id,))
+            self.log_order_change(conn, order_id, user["id"], "status", order["status"], "cancelled")
+            if order["selected_maker_id"]:
+                create_notification(conn, order["selected_maker_id"], "order_status",
+                    "Заказ отменён", f"Заказ «{order['title']}» был отменён заказчиком",
+                    f"/order/{order_id}")
+        self.send_json(200, {"ok": True})
+
+    def api_create_report(self):
+        data = self.read_json()
+        target_type = data.get("target_type", "")
+        target_id = data.get("target_id")
+        reason = data.get("reason", "").strip()[:500]
+        if target_type not in ("order", "company", "service", "review", "user"):
+            return self.send_error_json(400, "Некорректный тип объекта")
+        if not target_id:
+            return self.send_error_json(400, "Не указан объект жалобы")
+        if not reason:
+            return self.send_error_json(400, "Опишите причину жалобы")
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            conn.execute(
+                "INSERT INTO reports (reporter_id, target_type, target_id, reason, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+                (user["id"], target_type, int(target_id), reason, now()),
+            )
         self.send_json(200, {"ok": True})
 
     def api_threads(self):
@@ -1560,6 +1639,17 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                     return self.send_error_json(400, "Нельзя оставить отзыв себе")
                 if rating < 1 or rating > 5:
                     return self.send_error_json(400, "Рейтинг от 1 до 5")
+                if order_id:
+                    order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+                    if not order or order["status"] != "closed" or order["client_id"] != user["id"] or order["selected_maker_id"] != company_id:
+                        return self.send_error_json(403, "Отзыв можно оставить только по завершённому заказу с этой компанией")
+                else:
+                    deal = conn.execute(
+                        "SELECT id FROM orders WHERE client_id = ? AND selected_maker_id = ? AND status = 'closed' LIMIT 1",
+                        (user["id"], company_id),
+                    ).fetchone()
+                    if not deal:
+                        return self.send_error_json(403, "Отзыв можно оставить только после завершённой сделки с этой компанией")
                 conn.execute(
                     "INSERT INTO reviews (reviewer_id, company_id, order_id, rating, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (user["id"], company_id, order_id, rating, text, now()),
