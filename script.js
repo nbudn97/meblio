@@ -293,6 +293,7 @@ function applyRoute(path) {
 }
 
 function navigate(path) {
+  closeDrawer();
   history.pushState({}, "", path);
   applyRoute(path);
   render();
@@ -302,6 +303,15 @@ window.addEventListener("popstate", () => {
   applyRoute(location.pathname);
   render();
 });
+
+document.querySelector("#burgerBtn")?.addEventListener("click", () => {
+  const open = document.body.classList.toggle("drawer-open");
+  document.querySelector("#burgerBtn").setAttribute("aria-expanded", String(open));
+  document.querySelector("#mobileDrawer")?.setAttribute("aria-hidden", String(!open));
+});
+document.querySelector("#drawerOverlay")?.addEventListener("click", closeDrawer);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+document.querySelectorAll(".drawer-nav button").forEach((b) => b.addEventListener("click", closeDrawer));
 
 let csrfToken = null;
 
@@ -566,6 +576,21 @@ function renderHeader() {
        <button class="button button-secondary" type="button" data-auth="login">Войти</button>
        <button class="button button-primary" type="button" data-auth="register">Регистрация</button>`;
   document.querySelectorAll(".nav button").forEach((b) => b.classList.toggle("is-active", b.dataset.view === state.view));
+  const drawerAuth = document.querySelector("#drawerAuth");
+  if (drawerAuth) {
+    drawerAuth.innerHTML = state.user
+      ? `<button class="button button-primary" type="button" data-view="dashboard">${escapeHtml(state.user.name)}</button>
+         <button class="button button-secondary" type="button" data-action="logout">Выйти</button>`
+      : `<button class="button button-secondary" type="button" data-auth="login">Войти</button>
+         <button class="button button-primary" type="button" data-auth="register">Регистрация</button>`;
+    drawerAuth.querySelectorAll("button").forEach((b) => b.addEventListener("click", closeDrawer));
+  }
+}
+
+function closeDrawer() {
+  document.body.classList.remove("drawer-open");
+  document.querySelector("#burgerBtn")?.setAttribute("aria-expanded", "false");
+  document.querySelector("#mobileDrawer")?.setAttribute("aria-hidden", "true");
 }
 
 function renderSearchResults() {

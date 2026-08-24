@@ -10,10 +10,10 @@
     >
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@600;700&family=Inter:wght@400;500;600;700;800&family=Lora:wght@500;600;700&display=swap" rel="stylesheet">
     <link rel="icon" href="/meblio.png" type="image/png">
     <link rel="manifest" href="/manifest.json">
-    <meta name="theme-color" content="#3b82f6">
+    <meta name="theme-color" content="#c05621">
     <link rel="apple-touch-icon" href="/meblio.png">
     <link rel="stylesheet" href="styles.css">
   </head>
@@ -40,10 +40,46 @@
           <button type="button" data-view="dashboard">Кабинет</button>
         </nav>
         <div class="header-actions" id="headerActions"></div>
+        <button class="burger" id="burgerBtn" type="button" aria-label="Меню" aria-expanded="false">
+          <span></span><span></span><span></span>
+        </button>
       </div>
     </header>
 
+    <div class="drawer-overlay" id="drawerOverlay"></div>
+    <aside class="mobile-drawer" id="mobileDrawer" aria-hidden="true">
+      <nav class="drawer-nav" aria-label="Мобильная навигация">
+        <button type="button" data-view="home">Главная</button>
+        <button type="button" data-view="market">Заказы</button>
+        <button type="button" data-view="companies">Компании</button>
+        <button type="button" data-view="services">Услуги</button>
+        <button type="button" data-view="articles">Статьи</button>
+        <button type="button" data-view="dashboard">Кабинет</button>
+      </nav>
+      <div class="drawer-auth" id="drawerAuth"></div>
+    </aside>
+
     <main id="app"></main>
+
+    <footer class="site-footer">
+      <div class="container footer-grid">
+        <div>
+          <span class="footer-logo">Meblio</span>
+          <p class="muted" style="margin:8px 0 0;max-width:280px">B2B-площадка для заказчиков мебели и мебельных производств. mebl.io</p>
+        </div>
+        <div>
+          <h4>Продукт</h4>
+          <a href="/market" data-nav>Заказы</a>
+          <a href="/companies" data-nav>Компании</a>
+          <a href="/services" data-nav>Услуги</a>
+        </div>
+        <div>
+          <h4>Знания</h4>
+          <a href="/articles" data-nav>Статьи</a>
+        </div>
+      </div>
+      <div class="container footer-bottom">© 2026 Meblio · mebl.io</div>
+    </footer>
 
     <div class="modal" id="authModal" aria-hidden="true">
       <div class="modal-backdrop" data-close-modal></div>
