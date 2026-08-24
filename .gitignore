@@ -1,4 +1,6 @@
 meblio.db
+meblio.db-shm
+meblio.db-wal
 uploads/
 __pycache__/
 *.pyc
