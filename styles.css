@@ -1387,3 +1387,14 @@ input:focus, select:focus, textarea:focus {
 /* === Dark mode search === */
 [data-theme="dark"] .search-bar-header input::placeholder { color: #94a3b8; }
 [data-theme="dark"] .hero-search-input::placeholder { color: #94a3b8; }
+
+
+/* Router additions */
+.breadcrumbs { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+.breadcrumbs a { color: #3b82f6; text-decoration: none; }
+.breadcrumbs a:hover { text-decoration: underline; }
+.link-button { background: none; border: none; padding: 0; color: #3b82f6; cursor: pointer; font: inherit; text-decoration: underline; }
+.gallery-grid { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+.gallery-item { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.article-body h2 { margin-top: 20px; }
+.article-body ul { margin: 8px 0 8px 22px; }

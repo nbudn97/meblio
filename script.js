@@ -240,9 +240,68 @@ async function populateRegisterRegions() {
 function setView(view) {
   if (view === "dashboard" && !state.user) return openAuth("login");
   if (view === "admin" && (!state.user || state.user.role !== "admin")) return openAuth("login");
-  state.view = view;
+  navigate(VIEW_PATHS[view] || "/");
+}
+
+const VIEW_PATHS = {
+  home: "/", market: "/market", companies: "/companies", services: "/services",
+  articles: "/articles", notifications: "/notifications",
+  dashboard: "/dashboard", admin: "/admin", company: "/companies", service: "/services",
+};
+
+function parseRoute(path) {
+  const routes = [
+    [/^\/$/, () => ({ view: "home" })],
+    [/^\/market\/?$/, () => ({ view: "market" })],
+    [/^\/companies\/?$/, () => ({ view: "companies" })],
+    [/^\/companies\/(\d+)\/?$/, (m) => ({ view: "company", companyId: Number(m[1]) })],
+    [/^\/services\/?$/, () => ({ view: "services" })],
+    [/^\/services\/(\d+)\/?$/, (m) => ({ view: "service", serviceId: Number(m[1]) })],
+    [/^\/articles\/?$/, () => ({ view: "articles" })],
+    [/^\/articles\/([\w-]+)\/?$/, (m) => ({ view: "article", articleSlug: m[1] })],
+    [/^\/chat\/?$/, () => ({ view: "dashboard", tab: "chats" })],
+    [/^\/dashboard(?:\/([a-z-]+))?\/?$/i, (m) => ({ view: "dashboard", tab: m[1] || "overview" })],
+    [/^\/notifications\/?$/, () => ({ view: "notifications" })],
+    [/^\/admin(?:\/([a-z-]+))?\/?$/i, (m) => ({ view: "admin", tab: m[1] || "overview" })],
+    [/^\/orders\/(\d+)\/?$/, () => ({ view: "dashboard", tab: "my-orders" })],
+  ];
+  for (const [re, fn] of routes) {
+    const m = path.match(re);
+    if (m) return fn(m);
+  }
+  return { view: "home" };
+}
+
+function applyRoute(path) {
+  const route = parseRoute(path || "/");
+  if (route.view === "company") {
+    state.activeCompanyId = route.companyId;
+    state.view = "company";
+  } else if (route.view === "service") {
+    state.activeServiceId = route.serviceId;
+    state.view = "service";
+  } else if (route.view === "article") {
+    state.articleSlug = route.articleSlug;
+    state.view = "article";
+  } else if (route.tab) {
+    state.view = route.view;
+    if (route.tab) state.dashboardTab = route.tab;
+    if (route.view === "admin") state.adminTab = route.tab;
+  } else {
+    state.view = route.view;
+  }
+}
+
+function navigate(path) {
+  history.pushState({}, "", path);
+  applyRoute(path);
   render();
 }
+
+window.addEventListener("popstate", () => {
+  applyRoute(location.pathname);
+  render();
+});
 
 let csrfToken = null;
 
@@ -742,6 +801,7 @@ function renderCompanyProfile(company) {
   app.innerHTML = `
     <section class="dashboard">
       <div class="container">
+        <p class="breadcrumbs"><a href="/" data-nav>Главная</a> / <a href="/companies" data-nav>Компании</a> / ${escapeHtml(company.name)}</p>
         <div class="dashboard-top">
           <div>
             <p class="eyebrow">Профиль компании</p>
@@ -836,6 +896,9 @@ function renderCompanyProfile(company) {
               <div class="stat-card"><strong>${company.reviews_count || 0}</strong><p>отзывов</p></div>
               ${company.avg_rating ? `<div class="stat-card"><strong>${company.avg_rating}</strong><p>средний рейтинг</p></div>` : ''}
             </div>
+            ${state.user?.role === "client" && state.orders.some((o) => o.client_id === state.user.id && o.status === "open") ? `
+              <button class="button button-primary" type="button" data-invite-company="${company.id}" style="width:100%;margin-top:8px">Запросить расчёт</button>
+            ` : ""}
           </aside>
         </div>
       </div>
@@ -936,6 +999,10 @@ function dashboardContent() {
   return overview();
 }
 
+function renderAsync(promise) {
+  promise.then((html) => { app.innerHTML = html; startDeadlineTimers(); }).catch((e) => showToast(e.message));
+}
+
 async function makerStatsView() {
   let stats = null;
   try {
@@ -957,6 +1024,103 @@ async function makerStatsView() {
         <div class="bar-row"><span class="bar-label">${escapeHtml(m.month)}</span><div class="bar-track"><div class="bar-fill bar-type" style="width:${Math.max(4, m.cnt / Math.max(1, ...stats.by_month.map(x => x.cnt)) * 100)}%"></div></div><span class="bar-value">${m.cnt}</span></div>
       `).join("") || '<p class="muted">Пока нет откликов</p>'}
     </div>`;
+}
+
+async function servicesCatalogView() {
+  const data = await api("/api/services");
+  state.servicesCatalog = data.services;
+  return `
+    <section class="section"><div class="container">
+      <p class="eyebrow">Каталог</p>
+      <h1>Услуги мебельных производств</h1>
+      <div class="order-list" style="margin-top:16px">
+        ${state.servicesCatalog.length ? state.servicesCatalog.map((s) => `
+          <article class="maker-card">
+            <div class="maker-card-header">
+              <div>
+                <h3><a href="/services/${s.id}" data-nav>${escapeHtml(s.title)}</a></h3>
+                <p class="muted">${escapeHtml(s.company_name || "")} · ${escapeHtml(s.company_city || "")}</p>
+              </div>
+              ${s.price_type ? `<span class="badge">${escapeHtml(s.price_type)}</span>` : ""}
+            </div>
+            <p>${escapeHtml(s.description)}</p>
+            <div class="actions">
+              <a class="button button-secondary button-small" href="/companies/${s.user_id}" data-nav>Открыть компанию</a>
+            </div>
+          </article>`).join("") : emptyState("Услуг пока нет.")}
+      </div>
+    </div></section>`;
+}
+
+async function servicePageView(serviceId) {
+  let service;
+  try {
+    const data = await api(`/api/services/${serviceId}`);
+    service = data.service;
+  } catch (error) {
+    return `<div class="panel"><div class="empty">${escapeHtml(error.message)}</div></div>`;
+  }
+  return `
+    <section class="section"><div class="container">
+      <p class="breadcrumbs"><a href="/" data-nav>Главная</a> / <a href="/services" data-nav>Услуги</a> / ${escapeHtml(service.title)}</p>
+      <h1>${escapeHtml(service.title)}</h1>
+      <p class="lead">${escapeHtml(service.company_name || "")} · ${escapeHtml(service.company_city || "")}${service.price_type ? " · " + escapeHtml(service.price_type) : ""}</p>
+      ${(service.files || []).length ? `<ul class="chips">${service.files.map((f) => `<li><a href="${f.url}" target="_blank" rel="noreferrer">${escapeHtml(f.name)}</a></li>`).join("")}</ul>` : ""}
+      <div class="panel"><p>${escapeHtml(service.description)}</p></div>
+      <div class="actions">
+        <a class="button button-primary" href="/companies/${service.user_id}" data-nav>Открыть компанию</a>
+        <a class="button button-secondary" href="/market" data-nav>Найти заказы</a>
+      </div>
+    </div></section>`;
+}
+
+function renderMd(text) {
+  const esc = escapeHtml(text || "");
+  return esc
+    .replace(/^### (.*)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.*)$/gm, "<h2>$1</h2>")
+    .replace(/^# (.*)$/gm, "<h1>$1</h1>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/^\- (.*)$/gm, "<li>$1</li>")
+    .replace(/\[(.+?)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+    .split(/\n{2,}/)
+    .map((block) => block.match(/^\s*<(h\d|ul|li)/) ? block : `<p>${block.replace(/\n/g, "<br>")}</p>`)
+    .join("\n");
+}
+
+async function articlesListView() {
+  const data = await api("/api/articles");
+  state.articlesList = data.articles;
+  return `
+    <section class="section"><div class="container">
+      <p class="eyebrow">База знаний</p>
+      <h1>Статьи о мебельном производстве</h1>
+      <div class="order-list" style="margin-top:16px">
+        ${state.articlesList.length ? state.articlesList.map((a) => `
+          <article class="maker-card">
+            <h3><a href="/articles/${a.slug}" data-nav>${escapeHtml(a.title)}</a></h3>
+            <p>${escapeHtml(a.excerpt)}</p>
+            <small class="muted">${escapeHtml(a.updated_at)}</small>
+          </article>`).join("") : emptyState("Статей пока нет.")}
+      </div>
+    </div></section>`;
+}
+
+async function articlePageView(slug) {
+  let article;
+  try {
+    const data = await api(`/api/articles/${slug}`);
+    article = data.article;
+  } catch (error) {
+    return `<div class="panel"><div class="empty">${escapeHtml(error.message)}</div></div>`;
+  }
+  return `
+    <section class="section"><div class="container" style="max-width:760px">
+      <p class="breadcrumbs"><a href="/" data-nav>Главная</a> / <a href="/articles" data-nav>Статьи</a> / ${escapeHtml(article.title)}</p>
+      <h1>${escapeHtml(article.title)}</h1>
+      <small class="muted">${escapeHtml(article.updated_at)}</small>
+      <div class="panel article-body">${renderMd(article.body_md)}</div>
+    </div></section>`;
 }
 
 function overview() {
@@ -994,13 +1158,24 @@ function newOrderForm() {
       <label>Срок <input name="deadline" placeholder="30 дней" required></label>
       <label class="full">Описание <textarea name="details" rows="5" placeholder="Материалы, размеры, монтаж, доставка" required></textarea></label>
       <label class="full">Файлы <input name="files" type="file" multiple></label>
+      <label class="full"><input type="checkbox" name="is_draft" value="1"> Сохранить как черновик (виден только мне)</label>
       <button class="button button-primary full" type="submit">Опубликовать заказ</button>
     </form>`;
 }
 
 function myOrders() {
-  const orders = state.orders.filter((o) => o.client_id === state.user.id);
-  return `<div class="order-list">${orders.length ? orders.map((o) => `${orderCard(o)}${responsesBlock(o)}`).join("") : emptyState("Вы еще не создали заказ.", "Создать заказ", 'data-tab="new-order"')}</div>`;
+  let orders = state.orders.filter((o) => o.client_id === state.user.id && o.status !== "draft");
+  const drafts = state.orders.filter((o) => o.client_id === state.user.id && o.status === "draft");
+  const draftsBlock = drafts.length ? `
+    <div class="panel" style="margin-bottom:16px">
+      <h3>Черновики</h3>
+      ${drafts.map((d) => `
+        <div class="actions" style="justify-content:space-between">
+          <span>${escapeHtml(d.title)} · ${money(d.budget)}</span>
+          <button class="button button-primary button-small" type="button" data-publish-order="${d.id}">Опубликовать</button>
+        </div>`).join("")}
+    </div>` : "";
+  return `<div class="order-list">${draftsBlock}${orders.length ? orders.map((o) => `${orderCard(o)}${responsesBlock(o)}`).join("") : (drafts.length ? "" : emptyState("Вы еще не создали заказ.", "Создать заказ", 'data-tab="new-order"'))}</div>`;
 }
 
 function responsesBlock(order) {
@@ -1369,8 +1544,22 @@ async function render() {
     app.innerHTML = `<section class="dashboard"><div class="container">${skeletonCards(2)}</div></section>`;
     const data = await api(`/api/companies/${state.activeCompanyId}`);
     renderCompanyProfile(data.company);
+  } else if (state.view === "services") {
+    renderAsync(servicesCatalogView());
+  } else if (state.view === "service") {
+    renderAsync(servicePageView(state.activeServiceId));
+  } else if (state.view === "articles") {
+    renderAsync(articlesListView());
+  } else if (state.view === "article") {
+    renderAsync(articlePageView(state.articleSlug));
   } else if (state.view === "dashboard") {
     await Promise.all([loadOrders(), loadRegions()]);
+    if (state.user?.role === "client") {
+      try {
+        const drafts = await api("/api/orders?status=draft");
+        state.orders = state.orders.concat(drafts.orders);
+      } catch {}
+    }
     if (state.user?.role === "maker") {
       const data = await api(`/api/services?user_id=${state.user.id}`);
       state.services = data.services;
@@ -2638,6 +2827,10 @@ document.addEventListener("click", async (event) => {
   if (!target) return;
   try {
     if (target.dataset.view) return setView(target.dataset.view);
+    if (target.dataset.nav !== undefined) {
+      event.preventDefault();
+      return navigate(target.getAttribute("href"));
+    }
     if (target.dataset.auth) {
       if (target.dataset.role) registerForm.elements.role.value = target.dataset.role;
       return openAuth(target.dataset.auth);
@@ -2937,6 +3130,25 @@ document.addEventListener("click", async (event) => {
       await refreshData();
       return render();
     }
+    if (target.dataset.publishOrder) {
+      await api(`/api/orders/${target.dataset.publishOrder}/publish`, { method: "POST", body: JSON.stringify({}) });
+      showToast("Заказ опубликован", "success");
+      await refreshData();
+      return render();
+    }
+    if (target.dataset.inviteCompany) {
+      const companyId = Number(target.dataset.inviteCompany);
+      const open = state.orders.filter((o) => o.client_id === state.user.id && o.status === "open");
+      const list = open.map((o) => `${o.id}. ${o.title}`).join("\n");
+      const picked = prompt("К какому заказу запросить расчёт? Введите номер:\n" + list);
+      const order = open.find((o) => String(o.id) === String(picked));
+      if (!order) return;
+      try {
+        await api(`/api/companies/${companyId}/invite`, { method: "POST", body: JSON.stringify({ order_id: order.id }) });
+        showToast("Запрос расчёта отправлен", "success");
+      } catch (error) { showToast(error.message); }
+      return;
+    }
     if (target.dataset.sortResponses) {
       const [orderId, key] = target.dataset.sortResponses.split(":");
       const order = state.orders.find(o => o.id === Number(orderId));
@@ -2953,19 +3165,12 @@ document.addEventListener("click", async (event) => {
       return renderDashboard();
     }
     if (target.dataset.notifLink) {
-      const link = target.dataset.notifLink;
       const notifId = target.dataset.notifId;
       if (notifId) await api(`/api/notifications/${notifId}`, { method: "POST", body: JSON.stringify({}) });
       document.getElementById("notificationsPanel")?.remove();
-      if (link.startsWith("/company/")) {
-        state.activeCompanyId = Number(link.split("/")[2]);
-        state.view = "company";
-      } else if (link === "/market") {
-        state.view = "market";
-      } else if (link === "/chat") {
-        state.view = "dashboard"; state.dashboardTab = "chats";
-      }
-      return render();
+      const link = target.dataset.notifLink.replace(/^\/order\//, "/orders/").replace(/^\/company\//, "/companies/");
+      navigate(link);
+      return;
     }
     if (target.dataset.deleteDocument) {
       if (!confirm("Удалить документ?")) return;
@@ -2974,9 +3179,8 @@ document.addEventListener("click", async (event) => {
       return render();
     }
     if (target.dataset.companyId) {
-      state.activeCompanyId = Number(target.dataset.companyId);
-      state.view = "company";
-      return render();
+      navigate(`/companies/${Number(target.dataset.companyId)}`);
+      return;
     }
     if (target.dataset.toggleFavorite !== undefined) {
       if (!state.user) return openAuth("login");
@@ -3445,6 +3649,7 @@ document.querySelectorAll("[data-auth-tab]").forEach((b) => b.addEventListener("
 const savedTheme = localStorage.getItem("meblio-theme");
 if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
 
+applyRoute(location.pathname);
 loadSession().then(render).catch((error) => {
   app.innerHTML = `<section class="section"><div class="container"><div class="empty">${escapeHtml(error.message)}</div></div></section>`;
 });

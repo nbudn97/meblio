@@ -789,6 +789,107 @@ class MakerPortalTests(unittest.TestCase):
         self.assertEqual(status, 200)
 
 
+class SeoAndRoutingTests(unittest.TestCase):
+    def test_spa_fallback_and_seo_meta(self):
+        c = Client()
+        status, raw, headers = c.request("GET", "/companies/5")
+        self.assertEqual(status, 200)
+        html = raw["_raw"].decode("utf-8")
+        self.assertIn("<title>Test Co", html)
+        self.assertIn("og:title", html)
+        self.assertIn("application/ld+json", html)
+        self.assertIn('href="https://meblio.local/companies/5"', html)
+
+    def test_robots_and_sitemap(self):
+        c = Client()
+        status, _, _ = c.request("GET", "/robots.txt")
+        self.assertEqual(status, 200)
+        status, data, _ = c.request("GET", "/sitemap.xml")
+        self.assertEqual(status, 200)
+        xml = data["_raw"].decode("utf-8")
+        self.assertIn("<urlset", xml)
+        self.assertIn("/companies/", xml)
+
+    def test_articles_public_flow(self):
+        c = Client()
+        status, data, _ = c.request("GET", "/api/articles")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(data["articles"]), 3)
+        slug = data["articles"][0]["slug"]
+        status, data, _ = c.request("GET", f"/api/articles/{slug}")
+        self.assertEqual(status, 200)
+        self.assertIn("## ", data["article"]["body_md"])
+
+    def test_articles_admin_crud(self):
+        admin = Client()
+        admin.login("admin@meblio.ru", "admin123")
+        status, data, _ = admin.request(
+            "POST", "/api/admin/article-save",
+            body={"slug": f"test-art-{int(__import__('time').time())}", "title": "Тест",
+                  "excerpt": "кратко", "body_md": "## Раздел\nТекст", "is_published": True},
+        )
+        self.assertEqual(status, 200)
+        article_id = data["id"]
+        status, _, _ = admin.request("DELETE", f"/api/admin/articles/{article_id}")
+        self.assertEqual(status, 200)
+
+    def test_region_slug_filter(self):
+        c = Client()
+        status, regions, _ = c.request("GET", "/api/regions")
+        spb = next(r for r in regions["regions"] if r["name"] == "Санкт-Петербург")
+        self.assertTrue(spb["slug"])
+        status, data, _ = c.request("GET", f"/api/companies?region={spb['slug']}")
+        self.assertEqual(status, 200)
+
+
+class DraftAndInviteTests(unittest.TestCase):
+    def test_draft_order_visibility_and_publish(self):
+        client = Client()
+        client.register("draft-owner@test.local")
+        fields = {"title": "Черновик заказ", "type": "Тест", "quantity": "1",
+                  "city": "Москва", "budget": "100", "deadline": "1 день", "details": "x"}
+        body, ctype = make_multipart({**fields, "is_draft": "1"}, [])
+        status, data, _ = client.request("POST", "/api/orders", raw_body=body,
+                                         headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        draft_id = data["order"]["id"]
+
+        stranger = Client()
+        stranger.register("draft-stranger@test.local")
+        status, data, _ = stranger.request("GET", "/api/orders?status=draft")
+        self.assertEqual(data["orders"], [])
+
+        status, data, _ = client.request("GET", "/api/orders?status=draft")
+        self.assertTrue(any(o["id"] == draft_id for o in data["orders"]))
+        status, data, _ = client.request("GET", "/api/orders")
+        self.assertFalse(any(o["id"] == draft_id for o in data["orders"]))
+
+        status, _, _ = client.request("POST", f"/api/orders/{draft_id}/publish", body={})
+        self.assertEqual(status, 200)
+        anon = Client()
+        status, data, _ = anon.request("GET", "/api/orders")
+        self.assertTrue(any(o["id"] == draft_id for o in data["orders"]))
+
+    def test_invite_to_quote(self):
+        maker = Client()
+        maker.login("maker@meblio.ru", "maker123")
+        client = Client()
+        client.register("invite-client@test.local")
+        fields = {"title": "Приглашение", "type": "Тест", "quantity": "1",
+                  "city": "Москва", "budget": "7000", "deadline": "5 дней", "details": "x"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = client.request("POST", "/api/orders", raw_body=body,
+                                         headers={"Content-Type": ctype})
+        order_id = data["order"]["id"]
+        status, data, _ = client.request("GET", "/api/makers")
+        maker_id = next(mk["id"] for mk in data["makers"] if mk["name"] == "Modul Pro")
+        status, _, _ = client.request("POST", f"/api/companies/{maker_id}/invite",
+                                      body={"order_id": order_id})
+        self.assertEqual(status, 200)
+        status, data, _ = maker.request("GET", "/api/notifications")
+        self.assertTrue(any("Запрос расчёта" in n["title"] for n in data["notifications"]))
+
+
 class AdminAndExportTests(unittest.TestCase):
     def test_admin_endpoints_and_export(self):
         admin = Client()

@@ -87,6 +87,9 @@ TIMEENTRY_RE = re.compile(r"^/api/time-entries/(\d+)$")
 CLIENT_RATING_RE = re.compile(r"^/api/client-ratings/(\d+)$")
 ADMIN_REPORT_RE = re.compile(r"^/api/admin/reports/(\d+)/resolve$")
 GALLERY_RE = re.compile(r"^/api/gallery/(\d+)$")
+ARTICLE_SLUG_RE = re.compile(r"^/api/articles/([\w-]+)$")
+COMPANY_INVITE_RE = re.compile(r"^/api/companies/(\d+)/invite$")
+ADMIN_ARTICLE_RE = re.compile(r"^/api/admin/articles/(\d+)$")
 
 CSRF_EXEMPT_PATHS = {"/api/login", "/api/register", "/api/csrf-token", "/api/tfa/login"}
 
@@ -157,6 +160,178 @@ def read_trusted_user_id(self, conn):
     if not raw:
         return None
     return verify_trust_cookie(get_tfa_trust_secret(conn), raw.value)
+
+
+INDEX_CACHE = {"mtime": 0, "html": ""}
+
+
+def load_index_template():
+    path = BASE_DIR / "index.html"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return ""
+    if INDEX_CACHE["mtime"] != mtime:
+        INDEX_CACHE["mtime"] = mtime
+        INDEX_CACHE["html"] = path.read_text(encoding="utf-8")
+    return INDEX_CACHE["html"]
+
+
+def _esc(text):
+    import html as _html
+    return _html.escape(str(text or ""), quote=True)
+
+
+def seo_for_path(path):
+    host = "meblio.local"
+    base_title = "Meblio — площадка для заказчиков и производителей мебели"
+    base_desc = ("Meblio — рабочая площадка для общения заказчиков мебели и мебельных производств: "
+                 "заказы, отклики, личные кабинеты и чат.")
+    info = {"title": base_title, "description": base_desc,
+            "canonical": f"https://{host}{path}", "json_ld": None}
+    m = re.match(r"^/companies/(\d+)/?$", path)
+    if m:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT name, city, about, logo, region_id FROM users WHERE id = ?", (int(m.group(1)),)
+            ).fetchone()
+        if row:
+            info["title"] = f"{row['name']} — производитель мебели, {row['city']} | Meblio"
+            info["description"] = (row["about"] or f"{row['name']}, {row['city']}")[:160]
+            info["json_ld"] = {
+                "@context": "https://schema.org", "@type": "Organization",
+                "name": row["name"], "description": row["about"] or "",
+                "address": {"@type": "PostalAddress", "addressLocality": row["city"], "addressCountry": "RU"},
+            }
+        return info
+    m = re.match(r"^/services/(\d+)/?$", path)
+    if m:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT s.title, s.description, s.price_type, u.name AS company FROM services s "
+                "JOIN users u ON u.id = s.user_id WHERE s.id = ?",
+                (int(m.group(1)),),
+            ).fetchone()
+        if row:
+            info["title"] = f"{row['title']} — {row['company']} | Meblio"
+            info["description"] = (row["description"] or row["title"])[:160]
+            info["json_ld"] = {
+                "@context": "https://schema.org", "@type": "Service",
+                "name": row["title"], "description": row["description"] or "",
+                "provider": {"@type": "Organization", "name": row["company"]},
+            }
+        return info
+    m = re.match(r"^/articles/([\w-]+)/?$", path)
+    if m:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT title, excerpt FROM articles WHERE slug = ? AND is_published = 1", (m.group(1),)
+            ).fetchone()
+        if row:
+            info["title"] = f"{row['title']} | Meblio"
+            info["description"] = (row["excerpt"] or row["title"])[:160]
+        return info
+    view_titles = {
+        "/market": ("Заказы для производителей мебели", "Открытые заказы на изготовление мебели от заказчиков по всей России."),
+        "/companies": ("Каталог мебельных производств и поставщиков", "Производители мебели, проектировщики и поставщики фурнитуры с рейтингами и портфолио."),
+        "/services": ("Услуги мебельных производств", "Каталог услуг: кухни, шкафы, корпусная мебель на заказ."),
+        "/articles": ("Статьи о мебельном производстве", "Материалы о материалах, фурнитуре и работе с подрядчиками."),
+    }
+    if path in view_titles:
+        info["title"] = f"{view_titles[path][0]} | Meblio"
+        info["description"] = view_titles[path][1]
+    return info
+
+
+def render_index(self, path):
+    html = load_index_template()
+    if not html:
+        return self.send_error_json(404, "Файл не найден")
+    seo = seo_for_path(path)
+    html = re.sub(r"<title>.*?</title>", f"<title>{_esc(seo['title'])}</title>", html, count=1, flags=re.S)
+    html = re.sub(
+        r'<meta\s+name="description"[^>]*>',
+        f'<meta name="description" content="{_esc(seo["description"])}">',
+        html, count=1,
+    )
+    block = (
+        f'<link rel="canonical" href="{_esc(seo["canonical"])}">\n'
+        f'<meta property="og:title" content="{_esc(seo["title"])}">\n'
+        f'<meta property="og:description" content="{_esc(seo["description"])}">\n'
+        f'<meta property="og:type" content="website">\n'
+    )
+    if seo["json_ld"]:
+        block += f'<script type="application/ld+json">{json.dumps(seo["json_ld"], ensure_ascii=False)}</script>\n'
+    html = html.replace("</title>", "</title>\n    " + block.strip(), 1)
+    metrica_id = os.environ.get("MEBLIO_METRICA_ID", "")
+    if metrica_id:
+        block_m = (
+            f"<script>(function(m,e,t,r,i,k,a){{m[i]=m[i]||function(){{(m[i].a=m[i].a||[]).push(arguments)}};"
+            f"m[i].l=1*new Date();k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,"
+            f"a.parentNode.insertBefore(k,a)}})(window,document,'script','https://mc.yandex.ru/metrika/tag.js','ym');"
+            f"ym({metrica_id},'init',{{clickmap:true,trackLinks:true,accurateTrackBounce:true}});</script>"
+        )
+        html = html.replace("</body>", block_m + "</body>", 1)
+    data = html.encode("utf-8")
+    self.send_response(200)
+    self.send_header("Content-Type", "text/html; charset=utf-8")
+    self.send_header("Content-Length", str(len(data)))
+    for header, value in SECURITY_HEADERS.items():
+        self.send_header(header, value)
+    self.end_headers()
+    self.wfile.write(data)
+
+
+def serve_sitemap(self):
+    host = self.headers.get("Host", "127.0.0.1:8000")
+    today = now()[:10]
+    urls = [f"https://{host}/"]
+    with connect() as conn:
+        for row in conn.execute("SELECT id FROM users WHERE role = 'maker'").fetchall():
+            urls.append(f"https://{host}/companies/{row['id']}")
+        for row in conn.execute("SELECT id FROM services WHERE is_hidden = 0").fetchall():
+            urls.append(f"https://{host}/services/{row['id']}")
+        for row in conn.execute("SELECT slug, updated_at FROM articles WHERE is_published = 1").fetchall():
+            urls.append(f"https://{host}/articles/{row['slug']}")
+        region_slugs = [r["slug"] for r in conn.execute("SELECT slug FROM regions ORDER BY id").fetchall()]
+    type_slugs = ["client", "designer", "manufacturer", "serial", "supplier"]
+    for t_slug in type_slugs:
+        urls.append(f"https://{host}/companies/?type={t_slug}")
+        for r_slug in region_slugs:
+            urls.append(f"https://{host}/companies/?type={t_slug}&region={r_slug}")
+    for r_slug in region_slugs:
+        urls.append(f"https://{host}/companies/?region={r_slug}")
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for url in urls:
+        xml.append(f"<url><loc>{url}</loc><lastmod>{today}</lastmod></url>")
+    xml.append("</urlset>")
+    data = "\n".join(xml).encode("utf-8")
+    self.send_response(200)
+    self.send_header("Content-Type", "application/xml; charset=utf-8")
+    self.send_header("Content-Length", str(len(data)))
+    self.end_headers()
+    self.wfile.write(data)
+
+
+def serve_robots(self):
+    host = self.headers.get("Host", "127.0.0.1:8000")
+    body = (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /api/\n"
+        "Disallow: /dashboard\n"
+        "Disallow: /chat\n"
+        "Disallow: /admin\n"
+        "Disallow: /notifications\n"
+        "Disallow: /uploads/\n"
+        f"Sitemap: https://{host}/sitemap.xml\n"
+    )
+    data = body.encode("utf-8")
+    self.send_response(200)
+    self.send_header("Content-Type", "text/plain; charset=utf-8")
+    self.send_header("Content-Length", str(len(data)))
+    self.end_headers()
+    self.wfile.write(data)
 
 
 def create_pending_token(conn, table, user_id, minutes):
@@ -262,6 +437,10 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/healthz":
             return self.send_json(200, {"ok": True, "app": "meblio", "time": now()})
+        if path == "/sitemap.xml":
+            return serve_sitemap(self)
+        if path == "/robots.txt":
+            return serve_robots(self)
         if path == "/api/verify-email":
             return self.api_verify_email(parsed.query)
         if path == "/api/session":
@@ -362,13 +541,22 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         m = ADMIN_SERVICE_RE.match(path)
         if m:
             return self.api_admin_service_detail(int(m.group(1)))
+        if path == "/api/articles":
+            return self.api_articles_list()
+        m = ARTICLE_SLUG_RE.match(path)
+        if m:
+            return self.api_article_detail(m.group(1))
         if path == "/api/admin/reports":
             return self.api_admin_reports(parsed.query)
         if path.startswith("/uploads/"):
             return self.serve_upload(path)
         if path in STATIC_FILES:
+            if path == "/":
+                return render_index(self, path)
             return self.serve_static(STATIC_FILES[path])
-        return self.send_error_json(404, "Страница не найдена")
+        if path.startswith("/api/"):
+            return self.send_error_json(404, "Страница не найдена")
+        return render_index(self, path)
 
     def _handle_POST(self):
         parsed = urlparse(self.path)
@@ -452,15 +640,27 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 return self.api_cancel_order(order_id)
             if path.endswith("/close"):
                 return self.api_close_order(order_id)
+            if path.endswith("/publish"):
+                return self.api_publish_order(order_id)
         if path == "/api/reports":
             return self.api_create_report()
         if path == "/api/admin/hide":
             return self.api_admin_hide_content()
+        if path == "/api/admin/articles":
+            return self.api_admin_articles_list()
+        m = ADMIN_ARTICLE_RE.match(path)
+        if m:
+            return self.api_admin_article_delete(int(m.group(1)))
         if path == "/api/gallery":
             return self.api_upload_gallery()
+        if path == "/api/admin/article-save":
+            return self.api_admin_article_save()
         m = ADMIN_REPORT_RE.match(path)
         if m:
             return self.api_admin_report_resolve(int(m.group(1)))
+        m = COMPANY_INVITE_RE.match(path)
+        if m:
+            return self.api_invite_to_quote(int(m.group(1)))
         m = THREAD_ID_RE.match(path)
         if m and path.endswith("/messages"):
             return self.api_send_message(int(m.group(1)))
@@ -537,6 +737,9 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         m = GALLERY_RE.match(path)
         if m:
             return self.api_delete_gallery_item(int(m.group(1)))
+        m = ADMIN_ARTICLE_RE.match(path)
+        if m:
+            return self.api_admin_article_delete(int(m.group(1)))
         m = ADMIN_USER_RE.match(path)
         if m:
             return self.api_admin_delete_user(int(m.group(1)))
@@ -856,6 +1059,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         status_filter = params.get("status", [""])[0]
         page = max(1, int(params.get("page", ["1"])[0]))
         offset = (page - 1) * PAGE_SIZE
+        with connect() as conn:
+            viewer = self.current_user(conn)
         where = []
         values = []
         if type_filter:
@@ -864,9 +1069,16 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         if city_filter:
             where.append("LOWER(orders.city) LIKE ?")
             values.append(f"%{city_filter.lower()}%")
-        if status_filter:
+        if status_filter == "draft":
+            if not viewer:
+                return self.send_json(200, {"orders": [], "total": 0, "page": page, "page_size": PAGE_SIZE})
+            where.append("orders.client_id = ?")
+            values.append(viewer["id"])
+        elif status_filter:
             where.append("orders.status = ?")
             values.append(status_filter)
+        else:
+            where.append("orders.status != 'draft'")
         where.append("orders.is_hidden = 0")
         budget_min = params.get("budget_min", [""])[0]
         budget_max = params.get("budget_max", [""])[0]
@@ -919,8 +1131,12 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             where.append("company_type = ?")
             values.append(type_filter)
         if region_filter:
-            where.append("region_id = ?")
-            values.append(int(region_filter))
+            if region_filter.isdigit():
+                where.append("region_id = ?")
+                values.append(int(region_filter))
+            else:
+                where.append("region_id IN (SELECT id FROM regions WHERE slug = ?)")
+                values.append(region_filter)
         if search:
             where.append("(LOWER(users.name) LIKE ? OR LOWER(about) LIKE ?)")
             values.extend([f"%{search.lower()}%", f"%{search.lower()}%"])
@@ -998,10 +1214,12 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 return self.send_error_json(403, "Размещать заказы может только заказчик")
             try:
                 fields, files = self.read_multipart()
+                is_draft = fields.get("is_draft") == "1"
+                status = "draft" if is_draft else "open"
                 cur = conn.execute(
-                    """
+                    f"""
                     INSERT INTO orders (client_id, title, type, quantity, city, budget, deadline, details, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{status}', ?)
                     """,
                     (
                         user["id"],
@@ -1024,7 +1242,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                     )
                 order = conn.execute("SELECT orders.*, users.name AS client_name, NULL AS selected_maker_name FROM orders JOIN users ON users.id = orders.client_id WHERE orders.id = ?", (order_id,)).fetchone()
                 # Notify all makers about new order
-                makers = conn.execute("SELECT id FROM users WHERE role = 'maker'").fetchall()
+                makers = [] if is_draft else conn.execute("SELECT id FROM users WHERE role = 'maker'").fetchall()
                 for m in makers:
                     create_notification(conn, m["id"], "new_order",
                         "Новый заказ", f"{user['name']} создал заказ: {fields.get('title', '')}",
@@ -1129,6 +1347,48 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 create_notification(conn, other_party, "order_status",
                     "Заказ завершён", f"Заказ «{order['title']}» переведён в статус «Завершён»",
                     f"/order/{order_id}")
+        self.send_json(200, {"ok": True})
+
+    def api_publish_order(self, order_id):
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+            if not order or order["client_id"] != user["id"]:
+                return self.send_error_json(403, "Опубликовать может только заказчик")
+            if order["status"] != "draft":
+                return self.send_error_json(400, "Публикуется только черновик")
+            conn.execute("UPDATE orders SET status = 'open' WHERE id = ?", (order_id,))
+            self.log_order_change(conn, order_id, user["id"], "status", "draft", "open")
+            makers = conn.execute("SELECT id FROM users WHERE role = 'maker'").fetchall()
+            for m in makers:
+                create_notification(conn, m["id"], "new_order",
+                    "Новый заказ", f"{user['name']} опубликовал заказ: {order['title']}",
+                    "/market")
+        self.send_json(200, {"ok": True})
+
+    def api_invite_to_quote(self, company_id):
+        data = self.read_json()
+        order_id = int(data.get("order_id", 0))
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            company = conn.execute("SELECT * FROM users WHERE id = ?", (company_id,)).fetchone()
+            order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+            if not company or not order:
+                return self.send_error_json(404, "Компания или заказ не найдены")
+            if order["client_id"] != user["id"] or order["status"] not in ("open", "progress"):
+                return self.send_error_json(403, "Приглашать можно только к своему открытому заказу")
+            thread_id = ensure_thread(conn, order_id, user["id"], company_id)
+            conn.execute(
+                "INSERT INTO messages (thread_id, author_id, body, created_at) VALUES (?, ?, ?, ?)",
+                (thread_id, user["id"], f"Прошу рассчитать заказ: «{order['title']}» ({order['budget']} руб., {order['deadline']}).", now()),
+            )
+            create_notification(conn, company_id, "message",
+                "Запрос расчёта", f"{user['name']} просит рассчитать заказ «{order['title']}»",
+                "/chat")
         self.send_json(200, {"ok": True})
 
     def api_create_report(self):
@@ -2034,6 +2294,69 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             "companies": [{"type": "company", **c} for c in companies],
             "services": [{"type": "service", **s} for s in services],
         })
+
+    # --- Articles ---
+    def api_articles_list(self):
+        with connect() as conn:
+            rows = rows_to_list(conn.execute(
+                "SELECT slug, title, excerpt, updated_at FROM articles WHERE is_published = 1 ORDER BY updated_at DESC"
+            ).fetchall())
+        self.send_json(200, {"articles": rows})
+
+    def api_article_detail(self, slug):
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT slug, title, excerpt, body_md, updated_at FROM articles WHERE slug = ? AND is_published = 1",
+                (slug,),
+            ).fetchone()
+        if not row:
+            return self.send_error_json(404, "Статья не найдена")
+        self.send_json(200, {"article": row_to_dict(row)})
+
+    def api_admin_articles_list(self):
+        with connect() as conn:
+            admin = self.require_admin(conn)
+            if not admin:
+                return
+            rows = rows_to_list(conn.execute(
+                "SELECT id, slug, title, excerpt, is_published, updated_at FROM articles ORDER BY updated_at DESC"
+            ).fetchall())
+        self.send_json(200, {"articles": rows})
+
+    def api_admin_article_save(self):
+        data = self.read_json()
+        slug = data.get("slug", "").strip()
+        title = data.get("title", "").strip()
+        if not re.match(r"^[\w-]+$", slug or "") or not title:
+            return self.send_error_json(400, "Нужны корректные slug и заголовок")
+        with connect() as conn:
+            admin = self.require_admin(conn)
+            if not admin:
+                return
+            article_id = data.get("id")
+            fields = (title, data.get("excerpt", "").strip(), data.get("body_md", ""), 1 if data.get("is_published") else 0)
+            if article_id:
+                conn.execute(
+                    "UPDATE articles SET title=?, excerpt=?, body_md=?, is_published=?, updated_at=? WHERE id=?",
+                    (*fields, now(), int(article_id)),
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT INTO articles (slug, title, excerpt, body_md, is_published, author_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (slug, *fields, admin["id"], now(), now()),
+                )
+                article_id = cur.lastrowid
+            self.log_admin_activity(conn, admin["id"], "save_article", "article", article_id, title)
+        self.send_json(200, {"ok": True, "id": article_id})
+
+    def api_admin_article_delete(self, article_id):
+        with connect() as conn:
+            admin = self.require_admin(conn)
+            if not admin:
+                return
+            conn.execute("DELETE FROM articles WHERE id = ?", (article_id,))
+            self.log_admin_activity(conn, admin["id"], "delete_article", "article", article_id, "")
+        self.send_json(200, {"ok": True})
 
     # --- Company Documents ---
     def api_documents_list(self):
