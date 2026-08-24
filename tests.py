@@ -578,6 +578,55 @@ class DealAndModerationTests(unittest.TestCase):
         status, data, _ = c.request("GET", "/api/orders?budget_max=5000&budget_min=0")
         self.assertTrue(any(o["title"] == "Дешёвый" for o in data["orders"]))
 
+    def test_moderation_hide_content(self):
+        client = Client()
+        client.register("mod-client@test.local")
+        fields = {"title": "Скрываемый заказ", "type": "Тест", "quantity": "1",
+                  "city": "Москва", "budget": "100", "deadline": "1 день", "details": "x"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = client.request("POST", "/api/orders", raw_body=body,
+                                         headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        order_id = data["order"]["id"]
+
+        reporter = Client()
+        reporter.register("mod-reporter@test.local")
+        status, _, _ = reporter.request("POST", "/api/reports",
+                                        body={"target_type": "order", "target_id": order_id,
+                                              "reason": "спам-заказ"})
+        self.assertEqual(status, 200)
+
+        anon = Client()
+        status, data, _ = anon.request("GET", "/api/orders")
+        self.assertTrue(any(o["id"] == order_id for o in data["orders"]))
+
+        admin = Client()
+        admin.login("admin@meblio.ru", "admin123")
+        status, _, _ = admin.request("POST", "/api/admin/hide",
+                                     body={"target_type": "order", "target_id": order_id, "hidden": True})
+        self.assertEqual(status, 200)
+        status, data, _ = anon.request("GET", "/api/orders")
+        self.assertFalse(any(o["id"] == order_id for o in data["orders"]))
+
+        # hide via report resolution
+        status, _, _ = admin.request("POST", f"/api/admin/reports/resolve-all-not-implemented", body={})
+        status, data, _ = admin.request("GET", "/api/admin/reports?status=pending")
+        target_report = next(r for r in data["reports"] if r["target_id"] == order_id and r["status"] == "pending")
+        status, _, _ = admin.request("POST", f"/api/admin/reports/{target_report['id']}/resolve",
+                                     body={"status": "resolved", "hide_target": True})
+        self.assertEqual(status, 200)
+
+        # unhide restores visibility
+        status, _, _ = admin.request("POST", "/api/admin/hide",
+                                     body={"target_type": "order", "target_id": order_id, "hidden": False})
+        self.assertEqual(status, 200)
+        status, data, _ = anon.request("GET", "/api/orders")
+        self.assertTrue(any(o["id"] == order_id for o in data["orders"]))
+        # non-admin cannot hide
+        status, _, _ = client.request("POST", "/api/admin/hide",
+                                      body={"target_type": "order", "target_id": order_id, "hidden": True})
+        self.assertIn(status, (401, 403))
+
     def test_report_flow(self):
         reporter = Client()
         reporter.register("report-user@test.local")

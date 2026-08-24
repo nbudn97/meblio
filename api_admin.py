@@ -489,18 +489,22 @@ class AdminMixin:
     def api_admin_report_resolve(self, report_id):
         data = self.read_json()
         status = data.get("status", "resolved")
+        hide_target = bool(data.get("hide_target"))
         if status not in ("resolved", "rejected"):
             return self.send_error_json(400, "Некорректный статус")
         with connect() as conn:
             admin = self.require_admin(conn)
             if not admin:
                 return
-            cur = conn.execute(
-                "UPDATE reports SET status = ? WHERE id = ? AND status = 'pending'",
-                (status, report_id),
-            )
-            if cur.rowcount == 0:
+            report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+            if not report or report["status"] != "pending":
                 return self.send_error_json(404, "Жалоба не найдена или уже обработана")
+            conn.execute("UPDATE reports SET status = ? WHERE id = ?", (status, report_id))
+            if hide_target and report["target_type"] in ("order", "service"):
+                table = "orders" if report["target_type"] == "order" else "services"
+                conn.execute(f"UPDATE {table} SET is_hidden = 1 WHERE id = ?", (report["target_id"],))
+                self.log_admin_activity(conn, admin["id"], "hide_content", report["target_type"],
+                                        report["target_id"], f"Скрыто из жалобы #{report_id}")
             self.log_admin_activity(conn, admin["id"], "resolve_report", "report", report_id,
                                     f"Жалоба #{report_id} -> {status}")
         self.send_json(200, {"ok": True})

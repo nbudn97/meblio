@@ -444,6 +444,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 return self.api_close_order(order_id)
         if path == "/api/reports":
             return self.api_create_report()
+        if path == "/api/admin/hide":
+            return self.api_admin_hide_content()
         if path == "/api/gallery":
             return self.api_upload_gallery()
         m = ADMIN_REPORT_RE.match(path)
@@ -840,6 +842,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         if status_filter:
             where.append("orders.status = ?")
             values.append(status_filter)
+        where.append("orders.is_hidden = 0")
         budget_min = params.get("budget_min", [""])[0]
         budget_max = params.get("budget_max", [""])[0]
         if budget_min.isdigit():
@@ -1124,6 +1127,26 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             )
         self.send_json(200, {"ok": True})
 
+    def api_admin_hide_content(self):
+        data = self.read_json()
+        target_type = data.get("target_type", "")
+        target_id = int(data.get("target_id", 0))
+        hidden = 1 if data.get("hidden") else 0
+        table = {"order": "orders", "service": "services"}.get(target_type)
+        if not table or not target_id:
+            return self.send_error_json(400, "Некорректный объект скрытия")
+        with connect() as conn:
+            admin = self.require_admin(conn)
+            if not admin:
+                return
+            cur = conn.execute(f"UPDATE {table} SET is_hidden = ? WHERE id = ?", (hidden, target_id))
+            if cur.rowcount == 0:
+                return self.send_error_json(404, "Объект не найден")
+            action = "hide_content" if hidden else "unhide_content"
+            self.log_admin_activity(conn, admin["id"], action, target_type, target_id,
+                                    f"{action} #{target_id}")
+        self.send_json(200, {"ok": True})
+
     def api_maker_stats(self):
         with connect() as conn:
             user = self.require_user(conn)
@@ -1376,13 +1399,17 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         user_id = params.get("user_id", [""])[0]
         page = max(1, int(params.get("page", ["1"])[0]))
         offset = (page - 1) * PAGE_SIZE
-        where = []
-        values = []
-        if user_id:
-            where.append("services.user_id = ?")
-            values.append(int(user_id))
-        where_clause = (" WHERE " + " AND ".join(where)) if where else ""
         with connect() as conn:
+            viewer = self.current_user(conn)
+            is_own = user_id and viewer and viewer["id"] == int(user_id)
+            where = []
+            values = []
+            if user_id:
+                where.append("services.user_id = ?")
+                values.append(int(user_id))
+            if not is_own:
+                where.append("services.is_hidden = 0")
+            where_clause = (" WHERE " + " AND ".join(where)) if where else ""
             total = conn.execute(f"SELECT COUNT(*) FROM services{where_clause}", values).fetchone()[0]
             sql = f"""
                 SELECT services.*, users.name AS company_name, users.city AS company_city

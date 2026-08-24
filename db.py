@@ -290,6 +290,11 @@ def init_db():
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS app_config (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS company_documents (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -471,6 +476,8 @@ def init_db():
 
         ensure_column("users", "is_verified", "is_verified INTEGER NOT NULL DEFAULT 0")
         ensure_column("email_verifications", "purpose", "purpose TEXT NOT NULL DEFAULT 'verify'")
+        ensure_column("orders", "is_hidden", "is_hidden INTEGER NOT NULL DEFAULT 0")
+        ensure_column("services", "is_hidden", "is_hidden INTEGER NOT NULL DEFAULT 0")
 
         conn.executescript(
             """
