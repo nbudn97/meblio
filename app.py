@@ -35,6 +35,13 @@ STATIC_FILES = {
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 PAGE_SIZE = 20
 
+ALLOWED_UPLOAD_EXTS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif",
+    ".pdf", ".txt", ".csv", ".xlsx", ".docx", ".zip",
+    ".dwg", ".dxf",
+}
+INLINE_UPLOAD_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"}
+
 ORDER_ID_RE = re.compile(r"^/api/orders/(\d+)/")
 THREAD_ID_RE = re.compile(r"^/api/threads/(\d+)/")
 COMPANY_ID_RE = re.compile(r"^/api/companies/(\d+)")
@@ -138,6 +145,16 @@ def json_dumps(data):
 def safe_filename(name):
     cleaned = "".join(ch for ch in name if ch.isalnum() or ch in "._- ").strip()
     return cleaned or "file"
+
+
+def validate_upload_file(filename):
+    ext = Path(filename).suffix.lower()
+    if not ext or ext not in ALLOWED_UPLOAD_EXTS:
+        raise ValueError(
+            "Тип файла не разрешён. Разрешены: "
+            + ", ".join(sorted(ALLOWED_UPLOAD_EXTS))
+        )
+    return ext
 
 
 def parse_deadline_days(deadline_str):
@@ -464,6 +481,7 @@ class MeblioHandler(BaseHTTPRequestHandler):
                 original = disposition.split('filename="', 1)[1].split('"', 1)[0]
                 if not original:
                     continue
+                validate_upload_file(original)
                 mime = "application/octet-stream"
                 for header in headers:
                     if header.lower().startswith("content-type:"):
@@ -570,9 +588,13 @@ class MeblioHandler(BaseHTTPRequestHandler):
         if not str(file_path).startswith(str(UPLOAD_DIR.resolve())) or not file_path.exists():
             return self.send_error_json(404, "Файл не найден")
         mime = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        ext = file_path.suffix.lower()
+        disposition = "inline" if ext in INLINE_UPLOAD_EXTS else "attachment"
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(file_path.stat().st_size))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Disposition", f'{disposition}; filename="{name}"')
         self.end_headers()
         with file_path.open("rb") as source:
             shutil.copyfileobj(source, self.wfile)
