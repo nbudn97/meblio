@@ -398,6 +398,9 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         m = THREAD_ID_RE.match(path)
         if m and path.endswith("/messages"):
             return self.api_send_message(int(m.group(1)))
+        m = THREAD_ID_RE.match(path)
+        if m and path.endswith("/files"):
+            return self.api_upload_thread_file(int(m.group(1)))
         if path == "/api/profile":
             return self.api_profile()
         if path == "/api/admin/orders/status":
@@ -1077,7 +1080,73 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                     (thread_id,),
                 ).fetchall()
             )
+            files_by_message = {}
+            for f in conn.execute(
+                "SELECT * FROM message_files WHERE thread_id = ? ORDER BY id",
+                (thread_id,),
+            ).fetchall():
+                files_by_message.setdefault(f["message_id"], []).append({
+                    "id": f["id"],
+                    "name": f["original_name"],
+                    "size": f["size"],
+                    "mime": f["mime"],
+                    "url": f"/uploads/{f['stored_name']}",
+                })
+            for msg in messages:
+                msg["files"] = files_by_message.get(msg["id"], [])
         self.send_json(200, {"messages": messages})
+
+    def api_upload_thread_file(self, thread_id):
+        try:
+            fields, files = self.read_multipart()
+            if not files:
+                return self.send_error_json(400, "Файл не загружен")
+            with connect() as conn:
+                user = self.require_user(conn)
+                if not user:
+                    return
+                thread = conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
+                if not thread or user["id"] not in (thread["client_id"], thread["maker_id"]):
+                    return self.send_error_json(403, "Нет доступа к переписке")
+                if not check_rate_limit(f"msg:{user['id']}", 60, 60):
+                    return self.send_error_json(429, "Слишком часто отправляете сообщения")
+                for file in files:
+                    stored, original = store_upload(f"chat_{thread_id}", file["filename"], file["content"])
+                    cur = conn.execute(
+                        "INSERT INTO messages (thread_id, author_id, body, created_at) VALUES (?, ?, ?, ?)",
+                        (thread_id, user["id"], f"📎 {original}", now()),
+                    )
+                    conn.execute(
+                        "INSERT INTO message_files (message_id, thread_id, user_id, original_name, stored_name, size, mime, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (cur.lastrowid, thread_id, user["id"], original, stored, len(file["content"]), file["mime"], now()),
+                    )
+                    msg = conn.execute(
+                        "SELECT m.*, u.name AS author_name FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ?",
+                        (cur.lastrowid,),
+                    ).fetchone()
+                    message = row_to_dict(msg)
+                    message["files"] = [{
+                        "id": cur.lastrowid, "name": original,
+                        "size": len(file["content"]), "mime": file["mime"],
+                        "url": f"/uploads/{stored}",
+                    }]
+            try:
+                from ws_server import ws_manager
+                ws_manager.broadcast_to_thread(thread_id, {
+                    "type": "message",
+                    "thread_id": thread_id,
+                    "message": message,
+                })
+            except ImportError:
+                pass
+            with connect() as conn:
+                notify_user = thread["client_id"] if user["id"] == thread["maker_id"] else thread["maker_id"]
+                create_notification(conn, notify_user, "message",
+                    "Новое сообщение", f"{user['name']}: 📎 файл",
+                    f"/chat")
+            self.send_json(200, {"ok": True, "message": message})
+        except Exception as exc:
+            self.send_error_json(400, str(exc))
 
     def api_send_message(self, thread_id):
         data = self.read_json()

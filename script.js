@@ -1234,11 +1234,13 @@ function chatView() {
           ${state.messages.map((m) => `
             <div class="message ${m.author_id === state.user.id ? "mine" : ""}">
               ${escapeHtml(m.body)}
+              ${(m.files || []).map((f) => `<div><a href="${f.url}" target="_blank" rel="noreferrer">📎 ${escapeHtml(f.name)}</a></div>`).join("")}
               <small>${escapeHtml(m.author_name)} · ${escapeHtml(m.created_at)}</small>
             </div>`).join("")}
         </div>
         <form class="chat-controls" id="chatForm">
-          <input name="body" placeholder="Напишите сообщение" required>
+          <input name="body" placeholder="Напишите сообщение">
+          <input name="files" type="file" multiple title="Прикрепить файл" style="max-width:180px">
           <button class="button button-primary" type="submit">Отправить</button>
         </form>
       </section>
@@ -3034,21 +3036,29 @@ document.addEventListener("submit", async (event) => {
       return render();
     }
     if (event.target.id === "chatForm") {
-      const data = Object.fromEntries(new FormData(event.target));
-      if (!data.body?.trim()) return;
+      const formData = new FormData(event.target);
+      const hasFiles = formData.get("files")?.size > 0;
+      const body = String(formData.get("body") || "").trim();
+      if (!body && !hasFiles) return;
       event.target.reset();
-      // Optimistic UI: append message immediately
       const tempMsg = {
         id: Date.now(),
         thread_id: state.activeThreadId,
         author_id: state.user.id,
         author_name: state.user.name,
-        body: data.body,
+        body: hasFiles ? "📎 Файл" : body,
         created_at: new Date().toLocaleString("ru-RU"),
       };
       state.messages.push(tempMsg);
       appendMessage(tempMsg);
-      await api(`/api/threads/${state.activeThreadId}/messages`, { method: "POST", body: JSON.stringify(data) });
+      if (hasFiles) {
+        const uploadData = new FormData();
+        if (body) uploadData.append("body", body);
+        for (const file of formData.getAll("files")) uploadData.append("files", file);
+        await api(`/api/threads/${state.activeThreadId}/files`, { method: "POST", body: uploadData });
+      } else {
+        await api(`/api/threads/${state.activeThreadId}/messages`, { method: "POST", body: JSON.stringify({ body }) });
+      }
       return;
     }
     if (event.target.id === "profileForm") {

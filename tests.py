@@ -536,6 +536,46 @@ class DealAndModerationTests(unittest.TestCase):
         self.assertNotEqual(data["company"]["email"], "")
 
 
+class ChatFileTests(unittest.TestCase):
+    def test_upload_file_to_thread(self):
+        client = Client()
+        client.register("chatfile-client@test.local")
+        maker = Client()
+        maker.register("chatfile-maker@test.local", role="maker")
+        fields = {"title": "Чат-файлы", "type": "Тест", "quantity": "1",
+                  "city": "Москва", "budget": "100", "deadline": "2 дня", "details": "x"}
+        body, ctype = make_multipart(fields, [])
+        status, data, _ = client.request("POST", "/api/orders", raw_body=body,
+                                         headers={"Content-Type": ctype})
+        order_id = data["order"]["id"]
+        maker.request("POST", f"/api/orders/{order_id}/responses", body={"price": 90, "days": 2, "message": "ok"})
+        status, data, _ = client.request("GET", "/api/threads")
+        thread = next(t for t in data["threads"] if t["order_id"] == order_id)
+
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+            "01f15c4890000000d49444154789c626001000000ffff030000060005"
+            "57bfabd40000000049454e44ae426082"
+        )
+        file_body, file_ctype = make_multipart({}, [("files", "black.png", png, "image/png")])
+        status, data, _ = maker.request("POST", f"/api/threads/{thread['id']}/files",
+                                        raw_body=file_body, headers={"Content-Type": file_ctype})
+        self.assertEqual(status, 200)
+
+        status, data, _ = client.request("GET", f"/api/threads/{thread['id']}/messages")
+        self.assertEqual(status, 200)
+        file_msg = next(m for m in data["messages"] if m["files"])
+        self.assertEqual(file_msg["files"][0]["name"], "black.png")
+
+        # outsider cannot upload into thread
+        outsider = Client()
+        outsider.register("chatfile-outsider@test.local")
+        file_body2, file_ctype2 = make_multipart({}, [("files", "black.png", png, "image/png")])
+        status, _, _ = outsider.request("POST", f"/api/threads/{thread['id']}/files",
+                                        raw_body=file_body2, headers={"Content-Type": file_ctype2})
+        self.assertEqual(status, 403)
+
+
 class AdminAndExportTests(unittest.TestCase):
     def test_admin_endpoints_and_export(self):
         admin = Client()

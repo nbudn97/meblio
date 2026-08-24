@@ -180,6 +180,18 @@ def init_db():
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS message_files (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+              thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              original_name TEXT NOT NULL,
+              stored_name TEXT NOT NULL,
+              size INTEGER NOT NULL,
+              mime TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS services (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
