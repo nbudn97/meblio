@@ -86,6 +86,7 @@ CERTIFICATE_RE = re.compile(r"^/api/certificates/(\d+)$")
 TIMEENTRY_RE = re.compile(r"^/api/time-entries/(\d+)$")
 CLIENT_RATING_RE = re.compile(r"^/api/client-ratings/(\d+)$")
 ADMIN_REPORT_RE = re.compile(r"^/api/admin/reports/(\d+)/resolve$")
+GALLERY_RE = re.compile(r"^/api/gallery/(\d+)$")
 
 CSRF_EXEMPT_PATHS = {"/api/login", "/api/register", "/api/csrf-token", "/api/tfa/login"}
 
@@ -285,6 +286,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.api_time_entries_list(parsed.query)
         if path == "/api/client-ratings":
             return self.api_client_ratings_list(parsed.query)
+        if path == "/api/maker/stats":
+            return self.api_maker_stats()
         if path == "/api/admin/stats":
             return self.api_admin_stats()
         if path == "/api/admin/analytics":
@@ -392,6 +395,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 return self.api_cancel_order(order_id)
         if path == "/api/reports":
             return self.api_create_report()
+        if path == "/api/gallery":
+            return self.api_upload_gallery()
         m = ADMIN_REPORT_RE.match(path)
         if m:
             return self.api_admin_report_resolve(int(m.group(1)))
@@ -468,6 +473,9 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         m = TIMEENTRY_RE.match(path)
         if m:
             return self.api_delete_time_entry(int(m.group(1)))
+        m = GALLERY_RE.match(path)
+        if m:
+            return self.api_delete_gallery_item(int(m.group(1)))
         m = ADMIN_USER_RE.match(path)
         if m:
             return self.api_admin_delete_user(int(m.group(1)))
@@ -1029,6 +1037,71 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 "INSERT INTO reports (reporter_id, target_type, target_id, reason, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
                 (user["id"], target_type, int(target_id), reason, now()),
             )
+        self.send_json(200, {"ok": True})
+
+    def api_maker_stats(self):
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            if user["role"] != "maker":
+                return self.send_error_json(403, "Только для производителя")
+            responses_count = conn.execute("SELECT COUNT(*) FROM responses WHERE maker_id = ?", (user["id"],)).fetchone()[0]
+            chosen_count = conn.execute("SELECT COUNT(*) FROM orders WHERE selected_maker_id = ?", (user["id"],)).fetchone()[0]
+            active_orders = conn.execute("SELECT COUNT(*) FROM orders WHERE selected_maker_id = ? AND status = 'progress'", (user["id"],)).fetchone()[0]
+            closed = conn.execute("SELECT COUNT(*), COALESCE(SUM(budget), 0), COALESCE(AVG(budget), 0) FROM orders WHERE selected_maker_id = ? AND status = 'closed'", (user["id"],)).fetchone()
+            total_hours = conn.execute("SELECT COALESCE(SUM(hours), 0) FROM time_tracking WHERE user_id = ?", (user["id"],)).fetchone()[0]
+            avg_rating = conn.execute("SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE company_id = ?", (user["id"],)).fetchone()[0]
+            by_month = rows_to_list(conn.execute(
+                "SELECT strftime('%Y-%m', created_at) AS month, COUNT(*) AS cnt FROM responses WHERE maker_id = ? GROUP BY month ORDER BY month DESC LIMIT 6",
+                (user["id"],),
+            ).fetchall())
+        self.send_json(200, {
+            "responses_count": responses_count,
+            "chosen_count": chosen_count,
+            "conversion_rate": round(chosen_count / responses_count * 100, 1) if responses_count else 0,
+            "active_orders": active_orders,
+            "closed_orders": closed[0],
+            "revenue": closed[1],
+            "avg_order_budget": round(closed[2]) if closed[0] else 0,
+            "total_hours": round(total_hours, 1),
+            "avg_rating": round(avg_rating, 1),
+            "by_month": by_month,
+        })
+
+    def api_upload_gallery(self):
+        try:
+            fields, files = self.read_multipart()
+            if not files:
+                return self.send_error_json(400, "Файл не загружен")
+            with connect() as conn:
+                user = self.require_user(conn)
+                if not user:
+                    return
+                for file in files:
+                    stored, original = store_upload(f"gallery_{user['id']}", file["filename"], file["content"])
+                    conn.execute(
+                        "INSERT INTO company_gallery (user_id, original_name, stored_name, size, mime, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (user["id"], original, stored, len(file["content"]), file["mime"], now()),
+                    )
+            self.send_json(200, {"ok": True})
+        except Exception as exc:
+            self.send_error_json(400, str(exc))
+
+    def api_delete_gallery_item(self, gallery_id):
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            item = conn.execute("SELECT * FROM company_gallery WHERE id = ?", (gallery_id,)).fetchone()
+            if not item:
+                return self.send_error_json(404, "Работа не найдена")
+            if item["user_id"] != user["id"] and user["role"] != "admin":
+                return self.send_error_json(403, "Нет доступа")
+            file_path = UPLOAD_DIR / item["stored_name"]
+            if file_path.exists():
+                file_path.unlink()
+            conn.execute("DELETE FROM company_gallery WHERE id = ?", (gallery_id,))
         self.send_json(200, {"ok": True})
 
     def api_threads(self):

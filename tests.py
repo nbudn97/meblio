@@ -576,6 +576,44 @@ class ChatFileTests(unittest.TestCase):
         self.assertEqual(status, 403)
 
 
+class MakerPortalTests(unittest.TestCase):
+    def test_maker_stats(self):
+        maker = Client()
+        maker.register("stats-maker@test.local", role="maker")
+        status, data, _ = maker.request("GET", "/api/maker/stats")
+        self.assertEqual(status, 200)
+        self.assertIn("conversion_rate", data)
+        self.assertIn("responses_count", data)
+        client = Client()
+        client.login("client@meblio.ru", "client123")
+        status, data, _ = client.request("GET", "/api/maker/stats")
+        self.assertEqual(status, 403)
+        anon = Client()
+        status, _, _ = anon.request("GET", "/api/maker/stats")
+        self.assertEqual(status, 401)
+
+    def test_gallery_upload_and_delete(self):
+        maker = Client()
+        maker.register("gallery-maker@test.local", role="maker")
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+            "01f15c4890000000d49444154789c626001000000ffff030000060005"
+            "57bfabd40000000049454e44ae426082"
+        )
+        body, ctype = make_multipart({}, [("files", "work.png", png, "image/png")])
+        status, data, _ = maker.request("POST", "/api/gallery", raw_body=body,
+                                        headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        status, data, _ = maker.request("GET", "/api/session")
+        maker_id = data["user"]["id"]
+        status, data, _ = maker.request("GET", f"/api/companies/{maker_id}")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["company"]["gallery"])
+        item_id = data["company"]["gallery"][0]["id"]
+        status, _, _ = maker.request("DELETE", f"/api/gallery/{item_id}")
+        self.assertEqual(status, 200)
+
+
 class AdminAndExportTests(unittest.TestCase):
     def test_admin_endpoints_and_export(self):
         admin = Client()

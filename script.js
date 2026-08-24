@@ -65,6 +65,7 @@ const state = {
   clientRatings: [],
   clientAvgRating: 0,
   verifyUrl: null,
+  gallery: [],
 };
 
 let deadlineTimers = [];
@@ -892,7 +893,7 @@ function renderDashboard() {
   const isClient = state.user.role === "client";
   const tabs = isClient
     ? [["overview", "Обзор"], ["notifications", `Уведомления${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}`], ["new-order", "Создать заказ"], ["my-orders", "Мои заказы"], ["templates", "Шаблоны"], ["invoices", "Счета"], ["materials", "Материалы"], ["suppliers", "Поставщики"], ["certificates", "Сертификаты"], ["time", "Время"], ["favorites", "Избранные"], ["chats", "Сообщения"], ["security", "Безопасность"], ["profile", "Профиль"]]
-    : [["overview", "Обзор"], ["notifications", `Уведомления${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}`], ["available", "Доступные заказы"], ["responses", "Мои отклики"], ["my-services", "Мои услуги"], ["invoices", "Счета"], ["materials", "Материалы"], ["suppliers", "Поставщики"], ["time", "Время"], ["favorites", "Избранные"], ["chats", "Сообщения"], ["security", "Безопасность"], ["profile", "Профиль"]];
+    : [["overview", "Обзор"], ["notifications", `Уведомления${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}`], ["available", "Доступные заказы"], ["responses", "Мои отклики"], ["my-services", "Мои услуги"], ["analytics", "Аналитика"], ["invoices", "Счета"], ["materials", "Материалы"], ["suppliers", "Поставщики"], ["time", "Время"], ["favorites", "Избранные"], ["chats", "Сообщения"], ["security", "Безопасность"], ["profile", "Профиль"]];
   app.innerHTML = `
     <section class="dashboard">
       <div class="container">
@@ -931,7 +932,31 @@ function dashboardContent() {
   if (state.dashboardTab === "certificates") return certificatesView();
   if (state.dashboardTab === "time") return timeTrackingView();
   if (state.dashboardTab === "security") return tfaSetupView();
+  if (state.dashboardTab === "analytics") return makerStatsView();
   return overview();
+}
+
+async function makerStatsView() {
+  let stats = null;
+  try {
+    stats = await api("/api/maker/stats");
+  } catch (error) { return `<div class="panel">${escapeHtml(error.message)}</div>`; }
+  return `
+    <div class="stats">
+      <div class="stat-card"><strong>${stats.responses_count}</strong><p>откликов</p></div>
+      <div class="stat-card"><strong>${stats.conversion_rate}%</strong><p>конверсия в выбор</p></div>
+      <div class="stat-card"><strong>${stats.active_orders}</strong><p>заказов в работе</p></div>
+      <div class="stat-card"><strong>${money(stats.revenue)}</strong><p>выручка по закрытым</p></div>
+      <div class="stat-card"><strong>${stats.avg_rating}</strong><p>средний рейтинг</p></div>
+      <div class="stat-card"><strong>${stats.total_hours} ч</strong><p>учтено времени</p></div>
+    </div>
+    <div class="panel">
+      <h2>Отклики по месяцам</h2>
+      <div class="bar-row"><span class="bar-label"></span></div>
+      ${stats.by_month.map((m) => `
+        <div class="bar-row"><span class="bar-label">${escapeHtml(m.month)}</span><div class="bar-track"><div class="bar-fill bar-type" style="width:${Math.max(4, m.cnt / Math.max(1, ...stats.by_month.map(x => x.cnt)) * 100)}%"></div></div><span class="bar-value">${m.cnt}</span></div>
+      `).join("") || '<p class="muted">Пока нет откликов</p>'}
+    </div>`;
 }
 
 function overview() {
@@ -982,6 +1007,10 @@ function responsesBlock(order) {
   if (!order.responses?.length) return "";
   return `<div class="panel response-list" id="responses-${order.id}">
     <h3>Отклики на "${escapeHtml(order.title)}"</h3>
+    <p class="muted" style="margin:0 0 8px">Сортировка:
+      <button class="hint link-button" type="button" data-sort-responses="${order.id}:price">по цене</button> ·
+      <button class="hint link-button" type="button" data-sort-responses="${order.id}:days">по срокам</button>
+    </p>
     ${order.responses.map((r) => `
       <article class="maker-card">
         <div class="maker-card-header">
@@ -1086,6 +1115,19 @@ function profileForm() {
       <label class="full">Описание <textarea name="about" rows="4">${escapeHtml(user.about || "")}</textarea></label>
       <button class="button button-primary full" type="submit">Сохранить профиль</button>
     </form>
+    ${user.role === "maker" ? `
+      <h3 style="margin:24px 0 8px">Портфолио работ</h3>
+      <form class="stack-form grid-form" id="galleryForm" enctype="multipart/form-data">
+        <label class="full">Фото работ <input name="files" type="file" multiple accept="image/*"></label>
+        <button class="button button-secondary full" type="submit">Загрузить в портфолио</button>
+      </form>
+      <div class="gallery-grid">${(state.gallery || []).map((g) => `
+        <figure class="gallery-item">
+          <img src="${g.url}" alt="${escapeHtml(g.name)}" class="gallery-img">
+          <button class="button button-secondary button-small" type="button" data-del-gallery="${g.id}">Удалить</button>
+        </figure>`).join("") || '<p class="muted">Портфолио пустое</p>'}
+      </div>
+    ` : ""}
     <h3 style="margin:24px 0 8px">Смена пароля</h3>
     <form class="stack-form grid-form" id="changePwForm">
       <label class="full">Текущий пароль <input name="old_password" type="password" required></label>
@@ -1276,6 +1318,12 @@ async function refreshData() {
       state.services = data.services;
     }
     if (state.dashboardTab === "favorites") await loadFavorites();
+    if (state.dashboardTab === "profile" && state.user.role === "maker") {
+      try {
+        const data = await api(`/api/companies/${state.user.id}`);
+        state.gallery = data.company.gallery;
+      } catch { state.gallery = []; }
+    }
   }
 }
 
@@ -2853,6 +2901,27 @@ document.addEventListener("click", async (event) => {
       } catch (error) { showToast(error.message); }
       return;
     }
+    if (target.dataset.delGallery) {
+      await api(`/api/gallery/${target.dataset.delGallery}`, { method: "DELETE" });
+      showToast("Работа удалена", "success");
+      await refreshData();
+      return render();
+    }
+    if (target.dataset.sortResponses) {
+      const [orderId, key] = target.dataset.sortResponses.split(":");
+      const order = state.orders.find(o => o.id === Number(orderId));
+      if (!order) return;
+      const dir = state.sortDir?.[orderId]?.[key] === "asc" ? "desc" : "asc";
+      state.sortDir = state.sortDir || {};
+      state.sortDir[orderId] = state.sortDir[orderId] || {};
+      state.sortDir[orderId][key] = dir;
+      order.responses.sort((a, b) => {
+        const va = key === "rating" ? (a.maker_rating || 0) : a[key];
+        const vb = key === "rating" ? (b.maker_rating || 0) : b[key];
+        return dir === "asc" ? va - vb : vb - va;
+      });
+      return renderDashboard();
+    }
     if (target.dataset.notifLink) {
       const link = target.dataset.notifLink;
       const notifId = target.dataset.notifId;
@@ -3066,6 +3135,12 @@ document.addEventListener("submit", async (event) => {
       const result = await api("/api/profile", { method: "POST", body: JSON.stringify(data) });
       state.user = result.user;
       showToast("Профиль сохранён", "success");
+      return render();
+    }
+    if (event.target.id === "galleryForm") {
+      await api("/api/gallery", { method: "POST", body: new FormData(event.target) });
+      showToast("Работа добавлена в портфолио", "success");
+      await refreshData();
       return render();
     }
     if (event.target.id === "changePwForm") {
