@@ -1,4 +1,4 @@
-const CACHE_NAME = "meblio-v3";
+const CACHE_NAME = "meblio-v4";
 const STATIC_ASSETS = ["/", "/index.html", "/styles.css", "/script.js", "/meblio.png", "/manifest.json"];
 
 self.addEventListener("install", (event) => {

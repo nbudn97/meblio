@@ -632,6 +632,60 @@ def seed(conn):
         "INSERT INTO services (user_id, title, description, price_type, created_at) VALUES (?, ?, ?, ?, ?)",
         (maker_2_id, "Премиальные кухни", "Кухни из натурального шпона и МДФ эмаль, авторский дизайн.", "по проекту", now()),
     )
+
+    # Closed deal with review (demo of full lifecycle)
+    closed_order = conn.execute(
+        """
+        INSERT INTO orders (client_id, title, type, quantity, city, budget, deadline, details, status, selected_maker_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'closed', ?, ?)
+        """,
+        (
+            client_id, "Барная стойка для кофейни", "HoReCa и retail",
+            3, "Москва", 420000, "завершён",
+            "Стойка из МДФ эмали с подсветкой. Сделка успешно завершена.",
+            maker_2_id, now(),
+        ),
+    ).lastrowid
+    ensure_thread(conn, closed_order, client_id, maker_2_id)
+    conn.execute(
+        "INSERT OR IGNORE INTO reviews (reviewer_id, company_id, order_id, rating, text, created_at) VALUES (?, ?, ?, 5, ?, ?)",
+        (client_id, maker_2_id, closed_order,
+         "Сделали стойку точно в срок, эмаль идеальная. Рекомендую.", now()),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO client_ratings (order_id, maker_id, client_id, rating, text, created_at) VALUES (?, ?, ?, 5, ?, ?)",
+        (closed_order, maker_2_id, client_id,
+         "Чёткое ТЗ и быстрые согласования, отличные заказчики.", now()),
+    )
+    conn.execute(
+        "INSERT INTO invoices (order_id, from_user_id, to_user_id, amount, status, due_date, items, created_at) VALUES (?, ?, ?, ?, 'paid', '', '[]', ?)",
+        (closed_order, maker_2_id, client_id, 420000, now()),
+    )
+
+    # Portfolio gallery (tiny generated PNG placeholders)
+    from common import store_upload
+
+    def tiny_png(shade):
+        import struct as _s
+        import zlib as _z
+
+        def chunk(tag, data):
+            c = tag + data
+            return _s.pack(">I", len(data)) + c + _s.pack(">I", _z.crc32(c) & 0xFFFFFFFF)
+
+        row = b"\x00" + bytes([shade, shade, shade] * 64)
+        ihdr = _s.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0)
+        idat = _z.compress(row * 64)
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                + chunk(b"IDAT", idat) + chunk(b"IEND", b""))
+
+    for idx, (maker_uid, shade) in enumerate([(maker_id, 120), (maker_id, 180), (maker_2_id, 90)]):
+        stored, original = store_upload(f"gallery_{maker_uid}", f"portfolio-{idx + 1}.png", tiny_png(shade))
+        conn.execute(
+            "INSERT INTO company_gallery (user_id, original_name, stored_name, size, mime, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (maker_uid, original, stored, len(tiny_png(shade)), "image/png", now()),
+        )
+
     seed_materials(conn)
     seed_suppliers(conn)
 

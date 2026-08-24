@@ -1342,6 +1342,15 @@ async function refreshData() {
 async function render() {
   stopDeadlineTimers();
   renderHeader();
+  const viewTitles = {
+    home: "Meblio — площадка для заказчиков и производителей мебели",
+    market: "Заказы — Meblio",
+    companies: "Компании — Meblio",
+    company: "Компания — Meblio",
+    dashboard: "Личный кабинет — Meblio",
+    notifications: "Уведомления — Meblio",
+  };
+  document.title = viewTitles[state.view] || "Meblio";
 
   if (state.view === "home") {
     app.innerHTML = `<section class="hero"><div class="container">${skeletonCards(3)}</div></section>`;
