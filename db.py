@@ -539,7 +539,7 @@ def seed(conn):
 
 def seed_materials(conn):
     materials_data = [
-        ("ЛДСП Egger白", "ldsp", 1800, 18, "Белый ЛДСП Egger, 18мм", "Белый", "Egger"),
+        ("ЛДСП Egger белый", "ldsp", 1800, 18, "Белый ЛДСП Egger, 18мм", "Белый", "Egger"),
         ("ЛДСП Egger серый", "ldsp", 1900, 18, "Серый ЛДСП Egger, 18мм", "Серый", "Egger"),
         ("ЛДСП Egger орех", "ldsp", 2100, 18, "Орех ЛДСП Egger, 18мм", "Орех", "Egger"),
         ("ЛДСП Egger дуб", "ldsp", 2200, 18, "Дуб ЛДСП Egger, 18мм", "Дуб", "Egger"),
