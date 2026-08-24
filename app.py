@@ -128,15 +128,25 @@ def create_notification(conn, user_id, ntype, title, body="", link=""):
         print(f"[EMAIL NOTIFICATION] To user {user_id}: {title} — {body}")
 
 
+_rate_limits_last_purge = 0.0
+
+
 def check_rate_limit(key, max_attempts=5, window=300):
+    global _rate_limits_last_purge
     import time as _time
-    now = _time.time()
+    now_ts = _time.time()
+    if len(rate_limits) > 128 and now_ts - _rate_limits_last_purge > 60:
+        for stale_key in list(rate_limits.keys()):
+            rate_limits[stale_key] = [t for t in rate_limits[stale_key] if now_ts - t < window]
+            if not rate_limits[stale_key]:
+                del rate_limits[stale_key]
+        _rate_limits_last_purge = now_ts
     if key not in rate_limits:
         rate_limits[key] = []
-    rate_limits[key] = [t for t in rate_limits[key] if now - t < window]
+    rate_limits[key] = [t for t in rate_limits[key] if now_ts - t < window]
     if len(rate_limits[key]) >= max_attempts:
         return False
-    rate_limits[key].append(now)
+    rate_limits[key].append(now_ts)
     return True
 
 
@@ -157,6 +167,13 @@ def validate_upload_file(filename):
             + ", ".join(sorted(ALLOWED_UPLOAD_EXTS))
         )
     return ext
+
+
+def csv_safe(value):
+    text = "" if value is None else str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        text = "'" + text
+    return text.replace('"', '""')
 
 
 def parse_deadline_days(deadline_str):
@@ -2148,7 +2165,12 @@ class MeblioHandler(BaseHTTPRequestHandler):
         output.write("\ufeff")  # BOM for Excel
         output.write("ID,Название,Тип,Количество,Город,Бюджет,Срок,Статус,Заказчик,Исполнитель,Дата\n")
         for o in orders:
-            output.write(f'{o["id"]},"{o["title"]}","{o["type"]}",{o["quantity"]},"{o["city"]}",{o["budget"]},"{o["deadline"]}","{o["status"]}","{o["client_name"]}","{o.get("selected_maker_name") or ""}","{o["created_at"]}"\n')
+            output.write(
+                f'{o["id"]},"{csv_safe(o["title"])}","{csv_safe(o["type"])}",{o["quantity"]},'
+                f'"{csv_safe(o["city"])}",{o["budget"]},"{csv_safe(o["deadline"])}",'
+                f'"{o["status"]}","{csv_safe(o["client_name"])}",'
+                f'"{csv_safe(o.get("selected_maker_name") or "")}","{o["created_at"]}"\n'
+            )
         data = output.getvalue().encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")
