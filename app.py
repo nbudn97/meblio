@@ -38,9 +38,13 @@ from common import (
     csv_safe,
     parse_deadline_days,
     create_notification,
+    store_upload,
 )
+from logger import get_logger
 from api_admin import AdminMixin
 from api_catalog import CatalogMixin
+
+logger = get_logger("http")
 
 STATIC_FILES = {
     "/": "index.html",
@@ -48,6 +52,19 @@ STATIC_FILES = {
     "/styles.css": "styles.css",
     "/script.js": "script.js",
     "/meblio.png": "meblio.png",
+}
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws://127.0.0.1:8001 http://127.0.0.1:8001"
+    ),
 }
 ORDER_ID_RE = re.compile(r"^/api/orders/(\d+)/")
 THREAD_ID_RE = re.compile(r"^/api/threads/(\d+)/")
@@ -100,7 +117,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
     server_version = "MeblioHTTP/1.0"
 
     def log_message(self, fmt, *args):
-        print("[%s] %s" % (self.log_date_time_string(), fmt % args))
+        logger.info("%s [%s]", self.address_string(), fmt % args)
 
     def send_json(self, status, data, extra_headers=None):
         payload = json_dumps(data)
@@ -128,9 +145,34 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         self.send_error_json(403, "Недействительный CSRF-токен. Обновите страницу.")
         return False
 
+    def _safe_dispatch(self, handler, *args, **kwargs):
+        try:
+            return handler(*args, **kwargs)
+        except Exception:
+            logger.exception("Unhandled error in %s %s", self.command, self.path)
+            try:
+                self.send_error_json(500, "Внутренняя ошибка сервера")
+            except Exception:
+                pass
+            return None
+
     def do_GET(self):
+        return self._safe_dispatch(self._handle_GET)
+
+    def do_POST(self):
+        return self._safe_dispatch(self._handle_POST)
+
+    def do_PUT(self):
+        return self._safe_dispatch(self._handle_PUT)
+
+    def do_DELETE(self):
+        return self._safe_dispatch(self._handle_DELETE)
+
+    def _handle_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/healthz":
+            return self.send_json(200, {"ok": True, "app": "meblio", "time": now()})
         if path == "/api/session":
             return self.api_session()
         if path == "/api/orders":
@@ -233,7 +275,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.serve_static(STATIC_FILES[path])
         return self.send_error_json(404, "Страница не найдена")
 
-    def do_POST(self):
+    def _handle_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
         if path.startswith("/api/") and path not in CSRF_EXEMPT_PATHS and not self.check_csrf():
@@ -308,7 +350,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.api_admin_create_user()
         return self.send_error_json(404, "Метод не найден")
 
-    def do_PUT(self):
+    def _handle_PUT(self):
         parsed = urlparse(self.path)
         path = parsed.path
         if path.startswith("/api/") and not self.check_csrf():
@@ -333,7 +375,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.api_admin_update_user(int(m.group(1)))
         return self.send_error_json(404, "Метод не найден")
 
-    def do_DELETE(self):
+    def _handle_DELETE(self):
         parsed = urlparse(self.path)
         path = parsed.path
         if path.startswith("/api/") and not self.check_csrf():
@@ -414,7 +456,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 original = disposition.split('filename="', 1)[1].split('"', 1)[0]
                 if not original:
                     continue
-                validate_upload_file(original)
+                validate_upload_file(original, value)
                 mime = "application/octet-stream"
                 for header in headers:
                     if header.lower().startswith("content-type:"):
@@ -523,6 +565,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") else ""))
         self.send_header("Content-Length", str(len(data)))
+        for header, value in SECURITY_HEADERS.items():
+            self.send_header(header, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -581,7 +625,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 purge_expired_sessions(conn)
                 conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user_id, now()))
                 user = conn.execute("SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE users.id = ?", (user_id,)).fetchone()
-            self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure"})
+            self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"})
         except sqlite3.IntegrityError:
             self.send_error_json(409, "Пользователь с таким email уже зарегистрирован")
         except Exception as exc:
@@ -601,7 +645,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 token = secrets.token_urlsafe(32)
                 purge_expired_sessions(conn)
                 conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], now()))
-            self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure"})
+            self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"})
         except Exception as exc:
             self.send_error_json(400, str(exc))
 
@@ -640,7 +684,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 JOIN users clients ON clients.id = orders.client_id
                 LEFT JOIN users makers ON makers.id = orders.selected_maker_id
                 {where_clause}
-                ORDER BY orders.created_at DESC
+                ORDER BY orders.created_at DESC, orders.id DESC
                 LIMIT ? OFFSET ?
             """
             orders = self.order_payload_batch(conn, conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall())
@@ -686,7 +730,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 SELECT users.*, regions.name AS region_name
                 FROM users LEFT JOIN regions ON regions.id = users.region_id
                 {where_clause}
-                ORDER BY users.name
+                ORDER BY users.name, users.id
                 LIMIT ? OFFSET ?
             """
             companies = []
@@ -745,6 +789,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             user = self.require_user(conn)
             if not user:
                 return
+            if not check_rate_limit(f"create_order:{user['id']}", 20, 600):
+                return self.send_error_json(429, "Слишком много заказов. Подождите немного.")
             if user["role"] != "client":
                 return self.send_error_json(403, "Размещать заказы может только заказчик")
             try:
@@ -768,9 +814,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 )
                 order_id = cur.lastrowid
                 for file in files:
-                    original = safe_filename(file["filename"])
-                    stored = f"{order_id}_{secrets.token_hex(8)}_{original}"
-                    (UPLOAD_DIR / stored).write_bytes(file["content"])
+                    stored, original = store_upload(f"order_{order_id}", file["filename"], file["content"])
                     conn.execute(
                         "INSERT INTO order_files (order_id, original_name, stored_name, size, mime, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                         (order_id, original, stored, len(file["content"]), file["mime"], now()),
@@ -793,6 +837,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 user = self.require_user(conn)
                 if not user:
                     return
+                if not check_rate_limit(f"response:{user['id']}", 30, 600):
+                    return self.send_error_json(429, "Слишком много откликов. Подождите немного.")
                 if user["role"] != "maker":
                     return self.send_error_json(403, "Откликаться может только производитель")
                 order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
@@ -896,6 +942,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             user = self.require_user(conn)
             if not user:
                 return
+            if not check_rate_limit(f"msg:{user['id']}", 60, 60):
+                return self.send_error_json(429, "Слишком часто отправляете сообщения")
             thread = conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
             if not thread or user["id"] not in (thread["client_id"], thread["maker_id"]):
                 return self.send_error_json(403, "Нет доступа к переписке")
@@ -970,7 +1018,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 SELECT services.*, users.name AS company_name, users.city AS company_city
                 FROM services JOIN users ON users.id = services.user_id
                 {where_clause}
-                ORDER BY services.created_at DESC
+                ORDER BY services.created_at DESC, services.id DESC
                 LIMIT ? OFFSET ?
             """
             services = rows_to_list(conn.execute(sql, values + [PAGE_SIZE, offset]).fetchall())
@@ -1004,9 +1052,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 )
                 service_id = cur.lastrowid
                 for file in files:
-                    original = safe_filename(file["filename"])
-                    stored = f"svc_{service_id}_{secrets.token_hex(8)}_{original}"
-                    (UPLOAD_DIR / stored).write_bytes(file["content"])
+                    stored, original = store_upload(f"svc_{service_id}", file["filename"], file["content"])
                     conn.execute(
                         "INSERT INTO service_files (service_id, original_name, stored_name, size, mime, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                         (service_id, original, stored, len(file["content"]), file["mime"], now()),
@@ -1052,9 +1098,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 if not files:
                     return self.send_error_json(400, "Файл не загружен")
                 file = files[0]
-                original = safe_filename(file["filename"])
-                stored = f"logo_{user['id']}_{secrets.token_hex(8)}_{original}"
-                (UPLOAD_DIR / stored).write_bytes(file["content"])
+                stored, _ = store_upload(f"logo_{user['id']}", file["filename"], file["content"])
                 conn.execute("UPDATE users SET logo = ? WHERE id = ?", (stored, user["id"]))
                 self.send_json(200, {"ok": True, "logo": f"/uploads/{stored}"})
             except Exception as exc:
@@ -1177,7 +1221,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                    FROM orders JOIN users clients ON clients.id = orders.client_id
                    LEFT JOIN users makers ON makers.id = orders.selected_maker_id
                    WHERE orders.client_id = ? OR orders.selected_maker_id = ?
-                   ORDER BY orders.created_at DESC""",
+                   ORDER BY orders.created_at DESC, orders.id DESC""",
                 (user["id"], user["id"]),
             ).fetchall())
         # Generate simple CSV (Excel-compatible with UTF-8 BOM)
@@ -1335,6 +1379,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                 user = self.require_user(conn)
                 if not user:
                     return
+                if not check_rate_limit(f"review:{user['id']}", 5, 3600):
+                    return self.send_error_json(429, "Слишком много отзывов")
                 company_id = int(data.get("company_id", 0))
                 order_id = data.get("order_id")
                 if order_id:
@@ -1362,6 +1408,9 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
     def api_global_search(self, query):
         params = parse_qs(query)
         q = params.get("q", [""])[0].strip()
+        ip = self.client_address[0]
+        if not check_rate_limit(f"search:{ip}", 30, 60):
+            return self.send_error_json(429, "Слишком частые поисковые запросы")
         if len(q) < 2:
             return self.send_json(200, {"results": []})
         like = f"%{q.lower()}%"
@@ -1407,9 +1456,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                     return self.send_error_json(400, "Файл не загружен")
                 doc_type = fields.get("doc_type", "other")
                 for file in files:
-                    original = safe_filename(file["filename"])
-                    stored = f"doc_{user['id']}_{secrets.token_hex(8)}_{original}"
-                    (UPLOAD_DIR / stored).write_bytes(file["content"])
+                    stored, original = store_upload(f"doc_{user['id']}", file["filename"], file["content"])
                     conn.execute(
                         "INSERT INTO company_documents (user_id, original_name, stored_name, doc_type, size, mime, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (user["id"], original, stored, doc_type, len(file["content"]), file["mime"], now()),

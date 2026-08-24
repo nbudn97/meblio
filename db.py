@@ -30,9 +30,11 @@ REGIONS = [
 
 
 def connect():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     # Built-in LOWER()/UPPER() are ASCII-only in SQLite; override with Unicode-aware versions
     conn.create_function("LOWER", 1, lambda s: s.lower() if isinstance(s, str) else s)
     conn.create_function("UPPER", 1, lambda s: s.upper() if isinstance(s, str) else s)
@@ -415,6 +417,20 @@ def init_db():
             for name in REGIONS:
                 conn.execute("INSERT OR IGNORE INTO regions (name) VALUES (?)", (name,))
         purge_expired_sessions(conn)
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
+            CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read);
+            CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_orders_city ON orders(city);
+            CREATE INDEX IF NOT EXISTS idx_orders_client ON orders(client_id);
+            CREATE INDEX IF NOT EXISTS idx_reviews_company ON reviews(company_id);
+            CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+            CREATE INDEX IF NOT EXISTS idx_responses_order ON responses(order_id);
+            CREATE INDEX IF NOT EXISTS idx_threads_order ON threads(order_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+            """
+        )
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             seed(conn)

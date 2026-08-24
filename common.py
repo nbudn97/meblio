@@ -46,14 +46,50 @@ def safe_filename(name):
     return cleaned or "file"
 
 
-def validate_upload_file(filename):
+def validate_upload_file(filename, content=b""):
     ext = Path(filename).suffix.lower()
     if not ext or ext not in ALLOWED_UPLOAD_EXTS:
         raise ValueError(
             "Тип файла не разрешён. Разрешены: "
             + ", ".join(sorted(ALLOWED_UPLOAD_EXTS))
         )
+    _validate_magic_bytes(ext, content)
     return ext
+
+
+_MAGIC = {
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".gif": (b"GIF8",),
+    ".pdf": (b"%PDF",),
+    ".webp": (b"RIFF",),
+    ".zip": (b"PK\x03\x04", b"PK\x05\x06"),
+    ".docx": (b"PK\x03\x04",),
+    ".xlsx": (b"PK\x03\x04",),
+}
+
+
+def _validate_magic_bytes(ext, content):
+    signatures = _MAGIC.get(ext)
+    if not signatures or not content:
+        return
+    if not any(content.startswith(sig) for sig in signatures):
+        raise ValueError("Содержимое файла не соответствует расширению")
+
+
+def store_upload(prefix, filename, content):
+    """Save upload to uploads/YYYY/MM/<prefix>_<rand>_<safe>. Returns (stored_path, original_name)."""
+    import secrets
+    import time
+    from db import UPLOAD_DIR
+    original = safe_filename(filename)
+    sub = time.strftime("%Y/%m")
+    folder = UPLOAD_DIR / sub
+    folder.mkdir(parents=True, exist_ok=True)
+    stored = f"{sub}/{prefix}_{secrets.token_hex(8)}_{original}"
+    (UPLOAD_DIR / stored).write_bytes(content)
+    return stored, original
 
 
 def csv_safe(value):
@@ -101,4 +137,5 @@ def create_notification(conn, user_id, ntype, title, body="", link=""):
 
     # Email simulation (log to console)
     if prefs and prefs["email_enabled"]:
-        print(f"[EMAIL NOTIFICATION] To user {user_id}: {title} — {body}")
+        from logger import get_logger
+        get_logger("notify").info("[EMAIL NOTIFICATION] To user %s: %s — %s", user_id, title, body)

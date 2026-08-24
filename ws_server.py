@@ -10,6 +10,9 @@ import time
 from http.cookies import SimpleCookie
 
 from db import connect, row_to_dict, session_cutoff
+from logger import get_logger
+
+logger = get_logger("ws")
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-5AB9B0054F03"
 OPCODE_TEXT = 0x1
@@ -336,7 +339,7 @@ class WebSocketServer(threading.Thread):
         self._server_sock.settimeout(1.0)
         self._server_sock.bind(("127.0.0.1", self.port))
         self._server_sock.listen(32)
-        print(f"WebSocket server: ws://127.0.0.1:{self.port}")
+        logger.info("WebSocket server: ws://127.0.0.1:%s", self.port)
 
         while self._running:
             try:

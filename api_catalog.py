@@ -1,11 +1,10 @@
 """Catalog & project-tools API mixin: materials, templates, invoices, delivery,
 order history, suppliers, certificates, time tracking, client ratings."""
-import secrets
 import sqlite3
 from urllib.parse import parse_qs
 
 from db import UPLOAD_DIR, connect, row_to_dict, rows_to_list, now
-from common import PAGE_SIZE, create_notification, safe_filename
+from common import PAGE_SIZE, create_notification, store_upload
 
 
 class CatalogMixin:
@@ -338,9 +337,7 @@ class CatalogMixin:
                 original_name = ""
                 if files:
                     file = files[0]
-                    original_name = safe_filename(file["filename"])
-                    stored_name = f"cert_{user['id']}_{secrets.token_hex(8)}_{original_name}"
-                    (UPLOAD_DIR / stored_name).write_bytes(file["content"])
+                    stored_name, original_name = store_upload(f"cert_{user['id']}", file["filename"], file["content"])
                 cur = conn.execute(
                     "INSERT INTO company_certificates (user_id, name, cert_type, number, issued_by, issued_at, expires_at, stored_name, original_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (user["id"], fields.get("name", ""), fields.get("cert_type", "quality"),

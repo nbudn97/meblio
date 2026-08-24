@@ -262,6 +262,52 @@ class UploadWhitelistTests(unittest.TestCase):
         self.assertEqual(data["order"]["files"][0]["name"], "ok.png")
 
 
+class InfraTests(unittest.TestCase):
+    def test_healthz(self):
+        c = Client()
+        status, data, _ = c.request("GET", "/healthz")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+
+    def test_static_security_headers(self):
+        c = Client()
+        status, _, headers = c.request("GET", "/index.html")
+        self.assertEqual(status, 200)
+        self.assertIn("Content-Security-Policy", headers)
+        self.assertEqual(headers.get("X-Frame-Options"), "DENY")
+        self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+
+    def test_upload_magic_bytes_rejected(self):
+        c = Client()
+        c.register("magic-user@test.local")
+        base_fields = {"title": "Magic", "type": "Тест", "quantity": "1",
+                       "city": "Москва", "budget": "100", "deadline": "2 дня"}
+        fake_png = b"this is not really a png but has .png extension"
+        body, ctype = make_multipart(base_fields, [("files", "fake.png", fake_png, "image/png")])
+        status, data, _ = c.request("POST", "/api/orders", raw_body=body,
+                                    headers={"Content-Type": ctype})
+        self.assertEqual(status, 400)
+        self.assertIn("не соответствует расширению", data["error"])
+
+    def test_upload_stored_in_subdir(self):
+        import re
+        c = Client()
+        c.register("subdir-user@test.local")
+        base_fields = {"title": "Subdir", "type": "Тест", "quantity": "1",
+                       "city": "Москва", "budget": "100", "deadline": "2 дня"}
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+            "01f15c4890000000d49444154789c626001000000ffff030000060005"
+            "57bfabd40000000049454e44ae426082"
+        )
+        body, ctype = make_multipart(base_fields, [("files", "sub.png", png, "image/png")])
+        status, data, _ = c.request("POST", "/api/orders", raw_body=body,
+                                    headers={"Content-Type": ctype})
+        self.assertEqual(status, 200)
+        url = data["order"]["files"][0]["url"]
+        self.assertIsNotNone(re.match(r"^/uploads/\d{4}/\d{2}/", url))
+
+
 class SessionTtlTests(unittest.TestCase):
     def test_expired_session_invalidated(self):
         import sqlite3
