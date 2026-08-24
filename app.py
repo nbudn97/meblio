@@ -706,10 +706,23 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         if not path.exists():
             return self.send_error_json(404, "Файл не найден")
         mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        stat = path.stat()
+        etag = f'W/"{int(stat.st_mtime)}-{stat.st_size}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=3600")
+            for header, value in SECURITY_HEADERS.items():
+                self.send_header(header, value)
+            self.end_headers()
+            return
         data = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") else ""))
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("ETag", etag)
+        self.send_header("Last-Modified", self.date_time_string(int(stat.st_mtime)))
+        self.send_header("Cache-Control", "public, max-age=3600")
         for header, value in SECURITY_HEADERS.items():
             self.send_header(header, value)
         self.end_headers()

@@ -8,6 +8,23 @@ from contextlib import contextmanager
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def _load_env_file():
+    """Load .env from project dir; real environment variables take precedence."""
+    env_path = BASE_DIR / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+_load_env_file()
+
 DB_PATH = Path(os.environ.get("MEBLIO_DB", BASE_DIR / "meblio.db"))
 UPLOAD_DIR = Path(os.environ.get("MEBLIO_UPLOADS", BASE_DIR / "uploads"))
 

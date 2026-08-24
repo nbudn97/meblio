@@ -277,6 +277,15 @@ class InfraTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["ok"])
 
+    def test_static_etag_304(self):
+        c = Client()
+        status, _, headers = c.request("GET", "/styles.css")
+        self.assertEqual(status, 200)
+        etag = headers.get("ETag")
+        self.assertIsNotNone(etag)
+        status, _, headers2 = c.request("GET", "/styles.css", headers={"If-None-Match": etag})
+        self.assertEqual(status, 304)
+
     def test_static_security_headers(self):
         c = Client()
         status, _, headers = c.request("GET", "/index.html")
