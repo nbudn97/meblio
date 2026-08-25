@@ -88,29 +88,19 @@ img { display: block; max-width: 100%; }
 
 .as-button { border: 0; background: transparent; padding: 0; }
 
-.logo-mark {
-  display: inline-flex;
-  width: 40px;
-  height: 40px;
-  flex: 0 0 auto;
-  filter: drop-shadow(0 4px 8px rgba(37, 99, 235, 0.2));
-  transition: transform var(--transition);
-}
-
-.logo:hover .logo-mark { transform: scale(1.05); }
-.logo-mark svg { width: 100%; height: 100%; }
-.logo-mark-bg { fill: #eff6ff; stroke: rgba(37,99,235,0.4); stroke-width: 1.5; }
-.logo-panel-left { fill: var(--brand-deep); }
-.logo-panel-line { fill: none; stroke: var(--wood); stroke-linecap: round; stroke-linejoin: round; stroke-width: 3.2; }
-.logo-handle { fill: var(--brand); stroke: var(--white); stroke-width: 1.5; }
-
 .logo-word {
   color: var(--ink);
   font-family: "Comfortaa", Inter, sans-serif;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 700;
   letter-spacing: -0.02em;
+  transition: color var(--transition);
 }
+
+.logo:hover .logo-word { color: var(--brand-deep); }
+.logo-word .dot { color: var(--brand); }
+
+[data-theme="dark"] .logo-word .dot { color: #60a5fa; }
 
 .nav, .header-actions, .actions, .tabs, .meta-row, .chat-controls {
   display: flex;
