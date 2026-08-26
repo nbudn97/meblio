@@ -35,6 +35,7 @@ python -m unittest tests -v    # 35+ тестов, stdlib only
 - `PORT` / `WS_PORT` — порты сервисов
 - `SMTP_*` — реальная отправка писем (без них — mock в лог)
 - `MEBLIO_DEV=1` — возвращать ссылки верификации/сброса в ответах API
+- `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL` — LLM для AI-ассистента (без ключа — офлайн-режим)
 
 Подробности и деплой: [docs/DEPLOY.md](docs/DEPLOY.md).
 
@@ -44,6 +45,7 @@ python -m unittest tests -v    # 35+ тестов, stdlib only
 app.py           HTTP-сервер, роутинг, заказы, чат, аккаунты
 api_admin.py     AdminMixin: статистика, модерация, жалобы, бэк-офис
 api_catalog.py   CatalogMixin: материалы, шаблоны, счета, поставщики…
+api_ai.py        AiMixin: AI-ассистент (LLM или офлайн-движок)
 common.py        Общие хелперы (загрузки, rate limit, уведомления)
 db.py            Схема SQLite, миграции, seed
 ws_server.py     WebSocket (RFC 6455) для real-time чата

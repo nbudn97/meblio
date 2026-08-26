@@ -294,6 +294,16 @@ class InfraTests(unittest.TestCase):
         self.assertEqual(headers.get("X-Frame-Options"), "DENY")
         self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
 
+    def test_missing_asset_404_but_spa_routes_work(self):
+        c = Client()
+        status, _, _ = c.request("GET", "/missing-image.png")
+        self.assertEqual(status, 404)
+        status, _, _ = c.request("GET", "/deep/nested/photo.jpg")
+        self.assertEqual(status, 404)
+        status, raw, _ = c.request("GET", "/companies/5")
+        self.assertEqual(status, 200)
+        self.assertIn(b"<main id=\"app\">", raw["_raw"])
+
     def test_upload_magic_bytes_rejected(self):
         c = Client()
         c.register("magic-user@test.local")
@@ -920,6 +930,53 @@ class AdminAndExportTests(unittest.TestCase):
         self.assertTrue(raw.startswith("\ufeff"))
         self.assertIn("'=cmd() injection attempt", raw.replace('""', ""))
         self.assertIn("attachment", headers.get("Content-Disposition", ""))
+
+
+class AiChatTests(unittest.TestCase):
+    def test_ai_chat_history_and_clear(self):
+        c = Client()
+        c.register("ai-user@test.local")
+        status, _, _ = c.request("GET", "/api/ai/history")
+        self.assertEqual(status, 200)
+        status, data, _ = c.request("POST", "/api/ai/chat", body={"message": "Привет"})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["provider"], "builtin")  # no AI_API_KEY in tests
+        self.assertTrue(data["reply"])
+        status, data, _ = c.request("POST", "/api/ai/chat", body={"message": "Как создать заказ?"})
+        self.assertEqual(status, 200)
+        self.assertIn("Кабинет", data["reply"])
+        status, data, _ = c.request("GET", "/api/ai/history")
+        roles = [m["role"] for m in data["messages"]]
+        self.assertEqual(roles, ["user", "assistant", "user", "assistant"])
+
+    def test_ai_materials_intent_uses_db(self):
+        c = Client()
+        c.register("ai-materials@test.local")
+        status, data, _ = c.request("POST", "/api/ai/chat",
+                                    body={"message": "Подбери материал для корпуса"})
+        self.assertEqual(status, 200)
+        self.assertIn("ЛДСП", data["reply"])
+        self.assertIn("МДФ", data["reply"])
+
+    def test_ai_requires_login_and_validates_input(self):
+        anon = Client()
+        status, _, _ = anon.request("POST", "/api/ai/chat", body={"message": "тест"})
+        self.assertEqual(status, 401)
+        c = Client()
+        c.register("ai-validation@test.local")
+        status, _, _ = c.request("POST", "/api/ai/chat", body={"message": "   "})
+        self.assertEqual(status, 400)
+        status, _, _ = c.request("POST", "/api/ai/chat", body={"message": "x" * 5000})
+        self.assertEqual(status, 400)
+
+    def test_ai_clear(self):
+        c = Client()
+        c.register("ai-clear@test.local")
+        c.request("POST", "/api/ai/chat", body={"message": "Привет"})
+        status, _, _ = c.request("DELETE", "/api/ai/history")
+        self.assertEqual(status, 200)
+        status, data, _ = c.request("GET", "/api/ai/history")
+        self.assertEqual(data["messages"], [])
 
 
 if __name__ == "__main__":

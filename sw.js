@@ -1,9 +1,11 @@
-const CACHE_NAME = "meblio-v10";
-const STATIC_ASSETS = ["/", "/index.html", "/styles.css", "/script.js", "/meblio.png", "/manifest.json"];
+const CACHE_NAME = "meblio-v15";
+const STATIC_ASSETS = ["/", "/index.html", "/styles.css?v=13", "/script.js?v=14", "/meblio.png", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
+    caches.open(CACHE_NAME).then((cache) =>
+      cache.addAll(STATIC_ASSETS.map((url) => new Request(url, { cache: "reload" })))
+    )
   );
   self.skipWaiting();
 });

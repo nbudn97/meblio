@@ -43,6 +43,7 @@ from common import (
 from logger import get_logger
 from api_admin import AdminMixin
 from api_catalog import CatalogMixin
+from api_ai import AiMixin
 
 logger = get_logger("http")
 
@@ -52,6 +53,9 @@ STATIC_FILES = {
     "/styles.css": "styles.css",
     "/script.js": "script.js",
     "/meblio.png": "meblio.png",
+    "/hero-workshop.png": "hero-workshop.png",
+    "/sw.js": "sw.js",
+    "/manifest.json": "manifest.json",
 }
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -370,7 +374,7 @@ def validate_csrf_token(conn, token, session_token):
     return row is not None
 
 
-class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
+class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
     server_version = "MeblioHTTP/1.0"
 
     def log_message(self, fmt, *args):
@@ -520,6 +524,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.api_client_ratings_list(parsed.query)
         if path == "/api/maker/stats":
             return self.api_maker_stats()
+        if path == "/api/ai/history":
+            return self.api_ai_history()
         if path == "/api/admin/stats":
             return self.api_admin_stats()
         if path == "/api/admin/analytics":
@@ -556,6 +562,9 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.serve_static(STATIC_FILES[path])
         if path.startswith("/api/"):
             return self.send_error_json(404, "Страница не найдена")
+        last_segment = path.rsplit("/", 1)[-1]
+        if "." in last_segment and not last_segment.startswith("."):
+            return self.send_error_json(404, "Файл не найден")
         return render_index(self, path)
 
     def _handle_POST(self):
@@ -629,6 +638,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
             return self.api_export_excel()
         if path == "/api/auth/token":
             return self.api_auth_token()
+        if path == "/api/ai/chat":
+            return self.api_ai_chat()
         m = ORDER_ID_RE.match(path)
         if m:
             order_id = int(m.group(1))
@@ -713,6 +724,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
         if path.startswith("/api/documents/"):
             doc_id = path.split("/")[-1]
             return self.api_delete_document(int(doc_id))
+        if path == "/api/ai/history":
+            return self.api_ai_clear()
         m = SERVICE_ID_RE.match(path)
         if m and path == f"/api/services/{m.group(1)}":
             return self.api_delete_service(int(m.group(1)))
@@ -1247,9 +1260,11 @@ class MeblioHandler(AdminMixin, CatalogMixin, BaseHTTPRequestHandler):
                     create_notification(conn, m["id"], "new_order",
                         "Новый заказ", f"{user['name']} создал заказ: {fields.get('title', '')}",
                         f"/market")
-                self.send_json(200, {"order": self.order_payload(conn, order)})
+                payload = {"order": self.order_payload(conn, order)}
             except Exception as exc:
-                self.send_error_json(400, str(exc))
+                conn.rollback()
+                return self.send_error_json(400, str(exc))
+        self.send_json(200, payload)
 
     def api_create_response(self, order_id):
         try:

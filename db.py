@@ -535,6 +535,14 @@ def init_db():
               expires_at TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS ai_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
             """
         )
         existing_regions = conn.execute("SELECT COUNT(*) FROM regions").fetchone()[0]
@@ -572,6 +580,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_responses_order ON responses(order_id);
             CREATE INDEX IF NOT EXISTS idx_threads_order ON threads(order_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_ai_messages_user ON ai_messages(user_id, id);
             """
         )
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
