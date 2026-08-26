@@ -979,5 +979,63 @@ class AiChatTests(unittest.TestCase):
         self.assertEqual(data["messages"], [])
 
 
+class CompanyRequisitesTests(unittest.TestCase):
+    def test_profile_requisites_save_and_visible(self):
+        c = Client()
+        c.register("req-company@test.local", role="maker", name="Req LLC")
+        status, _, _ = c.request("POST", "/api/profile", body={
+            "name": "Req LLC", "city": "Москва", "inn": "7701234567",
+            "ogrn": "1027700132195", "website": "reqllc.ru", "is_public": "1",
+        })
+        self.assertEqual(status, 200)
+        status, data, _ = c.request("GET", "/api/session")
+        u = data["user"]
+        self.assertEqual(u["inn"], "7701234567")
+        self.assertEqual(u["ogrn"], "1027700132195")
+        self.assertEqual(u["website"], "https://reqllc.ru")
+        self.assertEqual(u["is_public"], 1)
+        status, data, _ = c.request("GET", f"/api/companies/{u['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["company"]["inn"], "7701234567")
+        self.assertEqual(data["company"]["ogrn"], "1027700132195")
+        self.assertEqual(data["company"]["website"], "https://reqllc.ru")
+
+    def test_invalid_requisites_rejected(self):
+        c = Client()
+        c.register("req-bad@test.local", role="maker")
+        status, _, _ = c.request("POST", "/api/profile", body={"name": "X", "city": "Москва", "inn": "abc"})
+        self.assertEqual(status, 400)
+        c2 = Client()
+        c2.register("req-bad2@test.local", role="maker")
+        status, _, _ = c2.request("POST", "/api/profile", body={"name": "X", "city": "Москва", "ogrn": "123"})
+        self.assertEqual(status, 400)
+        c3 = Client()
+        c3.register("req-bad3@test.local", role="maker")
+        status, _, _ = c3.request("POST", "/api/profile", body={"name": "X", "city": "Москва", "website": "not a url"})
+        self.assertEqual(status, 400)
+
+    def test_hidden_company_excluded_from_public(self):
+        owner = Client()
+        owner.register("hidden-company@test.local", role="maker", name="Hidden Co")
+        status, _, _ = owner.request("POST", "/api/profile",
+                                     body={"name": "Hidden Co", "city": "Москва", "is_public": "0"})
+        self.assertEqual(status, 200)
+        status, data, _ = owner.request("GET", "/api/session")
+        cid = data["user"]["id"]
+        anon = Client()
+        status, _, _ = anon.request("GET", f"/api/companies/{cid}")
+        self.assertEqual(status, 404)
+        status, data, _ = anon.request("GET", "/api/companies")
+        self.assertNotIn(cid, [c["id"] for c in data["companies"]])
+        status, data, _ = anon.request("GET", "/api/search?q=Hidden")
+        self.assertNotIn(cid, [c["id"] for c in data["companies"]])
+        status, data, _ = owner.request("GET", f"/api/companies/{cid}")
+        self.assertEqual(status, 200)
+        admin = Client()
+        admin.login("admin@meblio.ru", "admin123")
+        status, data, _ = admin.request("GET", f"/api/companies/{cid}")
+        self.assertEqual(status, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

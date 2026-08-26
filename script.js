@@ -837,6 +837,7 @@ function renderCompanyProfile(company) {
             <p class="eyebrow">Профиль компании</p>
             <h1>${escapeHtml(company.name)}</h1>
             <p class="lead">${companyTypeLabel(company.company_type)} · ${escapeHtml(company.city)} ${company.region_name ? "· " + escapeHtml(company.region_name) : ""}</p>
+            ${!company.is_public && state.user && (state.user.id === company.id || state.user.role === "admin") ? '<p><span class="badge" style="margin-top:6px">Профиль скрыт из каталога</span></p>' : ''}
             ${rating ? `<div class="rating-row">${rating} <span class="muted">(${company.reviews_count || 0} отзывов, среднее ${company.avg_rating})</span></div>` : ''}
           </div>
           <button class="button button-secondary" type="button" data-view="companies">Назад к каталогу</button>
@@ -849,6 +850,16 @@ function renderCompanyProfile(company) {
               ${company.capacity ? `<p class="muted">Мощность: ${escapeHtml(company.capacity)}</p>` : ""}
               ${skills.length ? `<ul class="chips">${skills.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}</ul>` : ""}
             </div>
+            ${company.inn || company.ogrn || company.website || company.region_name ? `
+            <div class="panel">
+              <h2>Реквизиты</h2>
+              <dl class="requisites">
+                ${company.inn ? `<div><dt>ИНН</dt><dd>${escapeHtml(company.inn)}</dd></div>` : ""}
+                ${company.ogrn ? `<div><dt>ОГРН</dt><dd>${escapeHtml(company.ogrn)}</dd></div>` : ""}
+                ${company.region_name ? `<div><dt>Регион</dt><dd>${escapeHtml(company.region_name)}</dd></div>` : ""}
+                ${company.website ? `<div><dt>Веб-сайт</dt><dd><a href="${escapeHtml(company.website)}" target="_blank" rel="noreferrer">${escapeHtml(company.website)}</a></dd></div>` : ""}
+              </dl>
+            </div>` : ""}
             <div class="panel">
               <h2>Услуги (${company.services?.length || 0})</h2>
               ${company.services?.length ? company.services.map((s) => `
@@ -1313,6 +1324,13 @@ function profileForm() {
         </select>
       </label>
       <label>Телефон <input name="phone" value="${escapeHtml(user.phone || "")}" placeholder="+7"></label>
+      <label>ИНН <input name="inn" value="${escapeHtml(user.inn || "")}" maxlength="12" placeholder="10 или 12 цифр"></label>
+      <label>ОГРН <input name="ogrn" value="${escapeHtml(user.ogrn || "")}" maxlength="15" placeholder="13 или 15 цифр"></label>
+      <label>Веб-сайт <input name="website" value="${escapeHtml(user.website || "")}" placeholder="https://example.ru"></label>
+      <label class="full check-label">
+        <input type="checkbox" name="is_public" ${user.is_public === 0 ? "" : "checked"}>
+        Публичный профиль — показывать компанию в каталоге и поиске
+      </label>
       ${user.role === "maker" ? `
         <label>Мощность <input name="capacity" value="${escapeHtml(user.capacity || "")}" placeholder="до 80 изделий в месяц"></label>
         <label class="full">Компетенции <input name="skills" value="${escapeHtml((user.skills || []).join(", "))}" placeholder="Кухни, шкафы, монтаж"></label>

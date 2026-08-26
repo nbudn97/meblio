@@ -1537,6 +1537,15 @@ input:focus, select:focus, textarea:focus {
 
 [data-theme="dark"] .site-footer { background: #151a23; }
 
+/* ===== Реквизиты компании ===== */
+.requisites { display: flex; flex-direction: column; gap: 8px; margin: 0; }
+.requisites > div { display: flex; gap: 10px; font-size: 14px; }
+.requisites dt { flex: 0 0 90px; color: var(--muted); }
+.requisites dd { margin: 0; word-break: break-word; }
+.requisites a { color: var(--brand-dark); }
+.check-label { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.check-label input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--brand); }
+
 /* ===== AI-ассистент ===== */
 .ai-fab {
   position: fixed;

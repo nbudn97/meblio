@@ -291,7 +291,7 @@ def serve_sitemap(self):
     today = now()[:10]
     urls = [f"https://{host}/"]
     with connect() as conn:
-        for row in conn.execute("SELECT id FROM users WHERE role = 'maker'").fetchall():
+        for row in conn.execute("SELECT id FROM users WHERE role = 'maker' AND is_public = 1").fetchall():
             urls.append(f"https://{host}/companies/{row['id']}")
         for row in conn.execute("SELECT id FROM services WHERE is_hidden = 0").fetchall():
             urls.append(f"https://{host}/services/{row['id']}")
@@ -859,6 +859,10 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
             "capacity": user["capacity"],
             "logo": user["logo"],
             "is_verified": bool(user.get("is_verified")),
+            "is_public": int(user.get("is_public", 1)),
+            "inn": user.get("inn", ""),
+            "ogrn": user.get("ogrn", ""),
+            "website": user.get("website", ""),
             "created_at": user["created_at"],
         }
         if include_contacts:
@@ -1119,7 +1123,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
     def api_makers(self):
         with connect() as conn:
             makers = [self.public_user(row_to_dict(row)) for row in conn.execute(
-                "SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE role = 'maker' ORDER BY name"
+                "SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE role = 'maker' AND is_public = 1 ORDER BY name"
             ).fetchall()]
         self.send_json(200, {"makers": makers})
 
@@ -1138,7 +1142,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
         search = params.get("search", [""])[0]
         page = max(1, int(params.get("page", ["1"])[0]))
         offset = (page - 1) * PAGE_SIZE
-        where = ["role = 'maker'"]
+        where = ["role = 'maker'", "is_public = 1"]
         values = []
         if type_filter:
             where.append("company_type = ?")
@@ -1190,6 +1194,9 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
             user = conn.execute("SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE users.id = ?", (company_id,)).fetchone()
             if not user:
                 return self.send_error_json(404, "Компания не найдена")
+            viewer = self.current_user(conn)
+            if not user["is_public"] and not (viewer and (viewer["id"] == company_id or viewer["role"] == "admin")):
+                return self.send_error_json(404, "Компания не найдена")
             services = rows_to_list(conn.execute("SELECT * FROM services WHERE user_id = ? ORDER BY created_at DESC", (company_id,)).fetchall())
             gallery = rows_to_list(conn.execute("SELECT * FROM company_gallery WHERE user_id = ? ORDER BY id", (company_id,)).fetchall())
             orders_count = conn.execute("SELECT COUNT(*) FROM orders WHERE client_id = ?", (company_id,)).fetchone()[0]
@@ -1203,7 +1210,6 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                 "SELECT id, original_name, doc_type, size FROM company_documents WHERE user_id = ? ORDER BY created_at DESC",
                 (company_id,),
             ).fetchall())
-            viewer = self.current_user(conn)
             include_contacts = self.contacts_visible(conn, viewer["id"] if viewer else None, company_id)
         data = self.public_user(row_to_dict(user), include_contacts=include_contacts)
         data["services"] = services
@@ -1675,9 +1681,25 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
             region_id = data.get("region_id")
             if region_id:
                 region_id = int(region_id)
+            inn = (data.get("inn") or "").strip()
+            ogrn = (data.get("ogrn") or "").strip()
+            website = (data.get("website") or "").strip()
+            if inn and (not inn.isdigit() or len(inn) not in (10, 12)):
+                return self.send_error_json(400, "ИНН должен содержать 10 или 12 цифр")
+            if ogrn and (not ogrn.isdigit() or len(ogrn) not in (13, 15)):
+                return self.send_error_json(400, "ОГРН должен содержать 13 или 15 цифр")
+            if website:
+                if not re.match(r"^https?://", website, flags=re.I):
+                    website = "https://" + website
+                parsed = urlparse(website)
+                netloc = parsed.netloc
+                if parsed.scheme not in ("http", "https") or not netloc or " " in website or not (netloc == "localhost" or "." in netloc):
+                    return self.send_error_json(400, "Некорректный адрес веб-сайта")
+            is_public = 1 if str(data.get("is_public", "0")).lower() in ("1", "on", "true") else 0
             conn.execute(
                 """
-                UPDATE users SET name = ?, city = ?, region_id = ?, phone = ?, about = ?, skills = ?, capacity = ?
+                UPDATE users SET name = ?, city = ?, region_id = ?, phone = ?, about = ?, skills = ?, capacity = ?,
+                inn = ?, ogrn = ?, website = ?, is_public = ?
                 WHERE id = ?
                 """,
                 (
@@ -1688,6 +1710,10 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                     data.get("about", "").strip(),
                     data.get("skills", "").strip(),
                     data.get("capacity", "").strip(),
+                    inn,
+                    ogrn,
+                    website,
+                    is_public,
                     user["id"],
                 ),
             )
@@ -2297,7 +2323,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                 (like, like),
             ).fetchall())
             companies = rows_to_list(conn.execute(
-                "SELECT id, name, city, company_type, about FROM users WHERE role = 'maker' AND (LOWER(name) LIKE ? OR LOWER(about) LIKE ?) LIMIT 10",
+                "SELECT id, name, city, company_type, about FROM users WHERE role = 'maker' AND is_public = 1 AND (LOWER(name) LIKE ? OR LOWER(about) LIKE ?) LIMIT 10",
                 (like, like),
             ).fetchall())
             services = rows_to_list(conn.execute(

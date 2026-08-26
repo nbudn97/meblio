@@ -1,5 +1,5 @@
-const CACHE_NAME = "meblio-v15";
-const STATIC_ASSETS = ["/", "/index.html", "/styles.css?v=13", "/script.js?v=14", "/meblio.png", "/manifest.json"];
+const CACHE_NAME = "meblio-v16";
+const STATIC_ASSETS = ["/", "/index.html", "/styles.css?v=13", "/script.js?v=15", "/meblio.png", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

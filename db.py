@@ -557,6 +557,10 @@ def init_db():
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
         ensure_column("users", "is_verified", "is_verified INTEGER NOT NULL DEFAULT 0")
+        ensure_column("users", "inn", "inn TEXT NOT NULL DEFAULT ''")
+        ensure_column("users", "ogrn", "ogrn TEXT NOT NULL DEFAULT ''")
+        ensure_column("users", "website", "website TEXT NOT NULL DEFAULT ''")
+        ensure_column("users", "is_public", "is_public INTEGER NOT NULL DEFAULT 1")
         ensure_column("email_verifications", "purpose", "purpose TEXT NOT NULL DEFAULT 'verify'")
         ensure_column("orders", "is_hidden", "is_hidden INTEGER NOT NULL DEFAULT 0")
         ensure_column("services", "is_hidden", "is_hidden INTEGER NOT NULL DEFAULT 0")
