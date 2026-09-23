@@ -1,5 +1,5 @@
-const CACHE_NAME = "meblio-v16";
-const STATIC_ASSETS = ["/", "/index.html", "/styles.css?v=13", "/script.js?v=15", "/meblio.png", "/manifest.json"];
+const CACHE_NAME = "meblio-v17";
+const STATIC_ASSETS = ["/", "/index.html", "/styles.css?v=13", "/script.js?v=16", "/meblio.png", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -21,6 +21,12 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
+
+  // Runtime config: always fresh, never cached
+  if (url.pathname === "/config.js") {
+    event.respondWith(fetch(event.request));
+    return;
+  }
 
   // API requests: network-first
   if (url.pathname.startsWith("/api/")) {

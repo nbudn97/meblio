@@ -33,8 +33,9 @@ python -m unittest tests -v    # 35+ тестов, stdlib only
 Скопируйте `.env.example` → `.env`. Основное:
 
 - `PORT` / `WS_PORT` — порты сервисов
+- `MEBLIO_HOST` — публичный домен для canonical/sitemap (SEO); без него берётся `Host`
 - `SMTP_*` — реальная отправка писем (без них — mock в лог)
-- `MEBLIO_DEV=1` — возвращать ссылки верификации/сброса в ответах API
+- `MEBLIO_DEV=1` — возвращать ссылки верификации/сброса в ответах API (по умолчанию 0)
 - `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL` — LLM для AI-ассистента (без ключа — офлайн-режим)
 
 Подробности и деплой: [docs/DEPLOY.md](docs/DEPLOY.md).

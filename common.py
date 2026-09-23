@@ -1,5 +1,6 @@
 """Shared constants and helpers for Meblio backend modules."""
 import json
+import os
 import time
 from pathlib import Path
 
@@ -7,6 +8,45 @@ from db import now
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 PAGE_SIZE = 20
+
+
+def is_dev_mode():
+    """MEBLIO_DEV=1 enables dev conveniences. Off by default (safe for production)."""
+    return os.environ.get("MEBLIO_DEV", "0") == "1"
+
+
+def request_host(headers=None):
+    """Host of the current request (always reachable): Host header > MEBLIO_HOST > meblio.local."""
+    if headers:
+        host = (headers.get("Host") or "").strip()
+        if host:
+            return host
+    return os.environ.get("MEBLIO_HOST", "").strip() or "meblio.local"
+
+
+def public_host(headers=None):
+    """Stable host for canonical/sitemap/robots: MEBLIO_HOST > Host > meblio.local."""
+    return os.environ.get("MEBLIO_HOST", "").strip() or request_host(headers)
+
+
+def public_base_url(headers=None, default_scheme="http"):
+    """Origin for outbound links: X-Forwarded-Proto > MEBLIO_SCHEME > default_scheme."""
+    proto = ""
+    if headers:
+        proto = (headers.get("X-Forwarded-Proto") or "").split(",")[0].strip()
+    if proto not in ("http", "https"):
+        proto = os.environ.get("MEBLIO_SCHEME", "").strip() or default_scheme
+    return f"{proto}://{request_host(headers)}"
+
+
+def canonical_base_url(headers=None):
+    """Origin for canonical/OG links: stable MEBLIO_HOST, https by default."""
+    proto = ""
+    if headers:
+        proto = (headers.get("X-Forwarded-Proto") or "").split(",")[0].strip()
+    if proto not in ("http", "https"):
+        proto = os.environ.get("MEBLIO_SCHEME", "").strip() or "https"
+    return f"{proto}://{public_host(headers)}"
 
 ALLOWED_UPLOAD_EXTS = {
     ".png", ".jpg", ".jpeg", ".webp", ".gif",

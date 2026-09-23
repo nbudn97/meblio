@@ -436,12 +436,24 @@ NIK2/
 - Карточка компании: блок **«Реквизиты»** (ИНН, ОГРН, регион, веб-сайт-ссылка); компетенции (`skills`) остаются чипсами в «О компании»
 - Миграция `ensure_column` (inn/ogrn/website/is_public, DEFAULT 1 — существующие профили публичны); тесты `CompanyRequisitesTests` (3 шт.: сохранение/отдача, валидация, скрытие); SW v16, `script.js?v=15`
 
+### 23.09.2026 — Прод-готовность и багфиксы
+- **`MEBLIO_DEV` default 0**: verify/reset-ссылки больше не утекают в API-ответы, если переменная не задана (раньше dev-режим был включён по умолчанию); хелпер `is_dev_mode()` в `common.py`, тесты явно ставят `MEBLIO_DEV=1`
+- **Публичный URL**: `public_host()`/`public_base_url()` — host из `MEBLIO_HOST` > `Host` > `meblio.local`, схема из `X-Forwarded-Proto` > `MEBLIO_SCHEME`; canonical, sitemap, robots и email-ссылки (регистрация, верификация, сброс пароля) больше не захардкожены на `http://`/`meblio.local`
+- **CSP `connect-src` динамический**: `wss://<Host>` (прокси nginx) + `ws://127.0.0.1:<WS_PORT>` (локальный дев); раньше был захардкожен только `ws://127.0.0.1:8001` и блокировал чат за nginx
+- **WebSocket в проде**: фронт на HTTPS подключается к `wss://<домен>/ws` (nginx `location = /ws` → :8001); на http — прямой порт из `/config.js` (динамический `window.MEBLIO_CONFIG`, `Cache-Control: no-store`, мимо кэша SW)
+- **nginx-баг**: regex `location ~ ^/(ws)?$` матчил `/` и уводил главную страницу на WS-порт 8001 → заменён на `location = /ws`
+- **Trusted device → привязка к паролю**: HMAC trusted-device cookie включает `password_hash` — смена/сброс пароля и удаление аккаунта инвалидируют `meblio_device` на всех устройствах (раньше cookie жила 30 дней после смены пароля). Старые cookies невалидны — пользователи с 2FA один раз введут код
+- **SW-регистрация**: перенесена из inline-скрипта index.html в `script.js` — inline блокируется CSP `script-src 'self'`, PWA не регистрировалась; SW v17, `script.js?v=16`, `/config.js` не кэшируется
+- **Доки**: `.env.example`/`DEPLOY.md` — пути `NIK2` → `Meblio`, документированы `MEBLIO_HOST`/`MEBLIO_SCHEME`, дефолт `MEBLIO_DEV=0`, WS через `/ws`
+- Тесты: `DevModeTests`, trusted-device после смены пароля, `/config.js`, динамический CSP; `MEBLIO_HOST=meblio.local` зафиксирован в tests.py
+
 ## Known Issues
 - Email через SMTP требует задания переменных окружения в проде
 - Мультиорганизации, Telegram/MAX-уведомления, 3D-viewer (как у Materix) — в roadmap
 - AI-ассистент без `AI_API_KEY` работает в офлайн-режиме (rule-based, без свободного диалога)
 - Модерация компаний/отзывов (is_hidden только у заказов/услуг)
-- app.py ~2000 строк
+- Inline-скрипт Яндекс.Метрики блокируется CSP `script-src 'self'` — при `MEBLIO_METRICA_ID` метрика не грузится (нужен nonce/hash)
+- app.py ~2400 строк
 
 ## Следующие шаги
 - [x] Уведомления (email/push)

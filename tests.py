@@ -14,6 +14,8 @@ from urllib.parse import quote
 _TMP = tempfile.mkdtemp(prefix="meblio-test-")
 os.environ["MEBLIO_DB"] = os.path.join(_TMP, "test.db")
 os.environ["MEBLIO_UPLOADS"] = os.path.join(_TMP, "uploads")
+os.environ["MEBLIO_DEV"] = "1"          # tests assert verify_url in responses
+os.environ["MEBLIO_HOST"] = "meblio.local"  # tests assert canonical host
 
 from db import init_db  # noqa: E402  (env must be set before import)
 import app as app_module  # noqa: E402
@@ -489,6 +491,44 @@ class AccountSecurityTests(unittest.TestCase):
         other = Client()
         status, data, _ = other.request("POST", "/api/login",
                                         body={"email": "tfa-user@test.local", "password": "secret123"})
+        self.assertTrue(data.get("tfa_required"))
+
+    def test_trusted_device_invalid_after_password_change(self):
+        c = Client()
+        c.register("tfa-pw@test.local")
+        status, data, _ = c.request("POST", "/api/tfa/setup")
+        self.assertEqual(status, 200)
+        secret = data["secret"]
+        status, _, _ = c.request("POST", "/api/tfa/verify",
+                                 body={"code": totp_code(secret), "enable": True})
+        c.request("POST", "/api/logout")
+        c.token = None
+        status, data, _ = c.request("POST", "/api/login",
+                                    body={"email": "tfa-pw@test.local", "password": "secret123"})
+        self.assertTrue(data.get("tfa_required"))
+        login_token = data["login_token"]
+        status, data, headers = c.request("POST", "/api/tfa/login",
+                                          body={"login_token": login_token, "code": totp_code(secret)})
+        self.assertEqual(status, 200)
+        all_cookies = " ".join(headers.get("_set_cookie_all", []))
+        session_token = all_cookies.split("meblio_session=", 1)[1].split(";", 1)[0]
+        device_part = [p for p in all_cookies.replace(" ", "\n").split("\n") if p.startswith("meblio_device=")]
+        self.assertTrue(device_part)
+        device_cookie = device_part[0].split("=", 1)[1].split(";", 1)[0]
+
+        # change password with the active session
+        c.token = session_token
+        c.fetch_csrf()
+        status, _, _ = c.request("POST", "/api/change-password",
+                                 body={"old_password": "secret123", "new_password": "newpass123"})
+        self.assertEqual(status, 200)
+
+        # trusted device cookie must no longer skip 2FA after the password change
+        fresh = Client()
+        fresh.device_cookie = device_cookie
+        status, data, _ = fresh.request("POST", "/api/login",
+                                        body={"email": "tfa-pw@test.local", "password": "newpass123"})
+        self.assertEqual(status, 200)
         self.assertTrue(data.get("tfa_required"))
 
 
@@ -1035,6 +1075,49 @@ class CompanyRequisitesTests(unittest.TestCase):
         admin.login("admin@meblio.ru", "admin123")
         status, data, _ = admin.request("GET", f"/api/companies/{cid}")
         self.assertEqual(status, 200)
+
+
+class DevModeTests(unittest.TestCase):
+    def test_dev_mode_off_hides_verify_url(self):
+        old = os.environ.get("MEBLIO_DEV")
+        os.environ["MEBLIO_DEV"] = "0"
+        try:
+            c = Client()
+            status, data = c.register("prod-mode@test.local")
+            self.assertEqual(status, 200)
+            self.assertNotIn("verify_url", data)
+        finally:
+            if old is None:
+                os.environ.pop("MEBLIO_DEV", None)
+            else:
+                os.environ["MEBLIO_DEV"] = old
+
+    def test_dev_mode_on_returns_verify_url(self):
+        os.environ["MEBLIO_DEV"] = "1"
+        c = Client()
+        status, data = c.register("dev-mode@test.local")
+        self.assertEqual(status, 200)
+        self.assertIn("verify_url", data)
+
+
+class ConfigJsTests(unittest.TestCase):
+    def test_config_js_served(self):
+        c = Client()
+        status, data, headers = c.request("GET", "/config.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", headers.get("Content-Type", ""))
+        body = data["_raw"].decode("utf-8")
+        self.assertIn("window.MEBLIO_CONFIG", body)
+        self.assertIn("wsPort", body)
+
+    def test_csp_connect_src_allows_dynamic_ws(self):
+        c = Client()
+        status, _, headers = c.request("GET", "/index.html")
+        self.assertEqual(status, 200)
+        csp = headers.get("Content-Security-Policy", "")
+        self.assertIn("connect-src", csp)
+        self.assertIn("wss://", csp)
+        self.assertIn("ws://127.0.0.1:", csp)
 
 
 if __name__ == "__main__":

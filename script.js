@@ -487,8 +487,12 @@ function connectWebSocket() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
 
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${protocol}//${location.hostname}:8001`);
+  const cfg = window.MEBLIO_CONFIG || {};
+  // Behind TLS (nginx) the chat goes through same-origin /ws; local dev uses the direct WS port.
+  const wsUrl = location.protocol === "https:"
+    ? `wss://${location.host}/ws`
+    : `ws://${location.hostname}:${cfg.wsPort || 8001}`;
+  ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "auth", token: getCookie("meblio_session") }));
@@ -3842,4 +3846,9 @@ const resetToken = new URLSearchParams(location.search).get("token");
 if (location.pathname.startsWith("/reset-password") && resetToken) {
   document.title = "Восстановление пароля — Meblio";
   renderResetPassword(resetToken);
+}
+
+// Register service worker here: inline scripts are blocked by CSP script-src 'self'
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
 }

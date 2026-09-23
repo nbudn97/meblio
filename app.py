@@ -39,6 +39,10 @@ from common import (
     parse_deadline_days,
     create_notification,
     store_upload,
+    is_dev_mode,
+    public_base_url,
+    public_host,
+    canonical_base_url,
 )
 from logger import get_logger
 from api_admin import AdminMixin
@@ -57,19 +61,26 @@ STATIC_FILES = {
     "/sw.js": "sw.js",
     "/manifest.json": "manifest.json",
 }
-SECURITY_HEADERS = {
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "strict-origin-when-cross-origin",
-    "Content-Security-Policy": (
-        "default-src 'self'; "
-        "script-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
-        "connect-src 'self' ws://127.0.0.1:8001 http://127.0.0.1:8001"
-    ),
-}
+def security_headers(host=""):
+    """Security headers; connect-src allows same-origin wss (nginx /ws) and local dev ws port."""
+    ws_port = os.environ.get("WS_PORT", "8001")
+    connect = "'self'"
+    if host:
+        connect += f" wss://{host}"
+    connect += f" ws://127.0.0.1:{ws_port}"
+    return {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Content-Security-Policy": (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self' data:; "
+            f"connect-src {connect}"
+        ),
+    }
 ORDER_ID_RE = re.compile(r"^/api/orders/(\d+)/")
 THREAD_ID_RE = re.compile(r"^/api/threads/(\d+)/")
 COMPANY_ID_RE = re.compile(r"^/api/companies/(\d+)")
@@ -133,22 +144,27 @@ def get_tfa_trust_secret(conn):
     return secret
 
 
-def make_trust_cookie(secret, user_id):
+def make_trust_cookie(secret, user_id, password_hash):
     import hashlib as _hashlib
     import hmac as _hmac
     import time as _time
     expires = int(_time.time()) + TRUST_DEVICE_DAYS * 86400
-    sig = _hmac.new(secret.encode(), f"{user_id}:{expires}".encode(), _hashlib.sha256).hexdigest()
+    basis = f"{user_id}:{expires}:{password_hash}"
+    sig = _hmac.new(secret.encode(), basis.encode(), _hashlib.sha256).hexdigest()
     return f"{user_id}:{expires}:{sig}"
 
 
-def verify_trust_cookie(secret, cookie_value):
+def verify_trust_cookie(secret, cookie_value, conn):
     import hashlib as _hashlib
     import hmac as _hmac
     import time as _time
     try:
         user_id, expires, sig = cookie_value.split(":")
-        expected = _hmac.new(secret.encode(), f"{user_id}:{expires}".encode(), _hashlib.sha256).hexdigest()
+        row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (int(user_id),)).fetchone()
+        if not row:
+            return None
+        basis = f"{user_id}:{expires}:{row['password_hash']}"
+        expected = _hmac.new(secret.encode(), basis.encode(), _hashlib.sha256).hexdigest()
         if not _hmac.compare_digest(sig, expected):
             return None
         if int(expires) < _time.time():
@@ -163,7 +179,7 @@ def read_trusted_user_id(self, conn):
     raw = jar.get(TRUST_DEVICE_COOKIE)
     if not raw:
         return None
-    return verify_trust_cookie(get_tfa_trust_secret(conn), raw.value)
+    return verify_trust_cookie(get_tfa_trust_secret(conn), raw.value, conn)
 
 
 INDEX_CACHE = {"mtime": 0, "html": ""}
@@ -186,13 +202,12 @@ def _esc(text):
     return _html.escape(str(text or ""), quote=True)
 
 
-def seo_for_path(path):
-    host = "meblio.local"
+def seo_for_path(path, headers=None):
     base_title = "Meblio — площадка для заказчиков и производителей мебели"
     base_desc = ("Meblio — рабочая площадка для общения заказчиков мебели и мебельных производств: "
                  "заказы, отклики, личные кабинеты и чат.")
     info = {"title": base_title, "description": base_desc,
-            "canonical": f"https://{host}{path}", "json_ld": None}
+            "canonical": f"{canonical_base_url(headers)}{path}", "json_ld": None}
     m = re.match(r"^/companies/(\d+)/?$", path)
     if m:
         with connect() as conn:
@@ -251,7 +266,7 @@ def render_index(self, path):
     html = load_index_template()
     if not html:
         return self.send_error_json(404, "Файл не найден")
-    seo = seo_for_path(path)
+    seo = seo_for_path(path, self.headers)
     html = re.sub(r"<title>.*?</title>", f"<title>{_esc(seo['title'])}</title>", html, count=1, flags=re.S)
     html = re.sub(
         r'<meta\s+name="description"[^>]*>',
@@ -280,14 +295,14 @@ def render_index(self, path):
     self.send_response(200)
     self.send_header("Content-Type", "text/html; charset=utf-8")
     self.send_header("Content-Length", str(len(data)))
-    for header, value in SECURITY_HEADERS.items():
+    for header, value in security_headers(self.headers.get("Host", "")).items():
         self.send_header(header, value)
     self.end_headers()
     self.wfile.write(data)
 
 
 def serve_sitemap(self):
-    host = self.headers.get("Host", "127.0.0.1:8000")
+    host = public_host(self.headers)
     today = now()[:10]
     urls = [f"https://{host}/"]
     with connect() as conn:
@@ -318,7 +333,7 @@ def serve_sitemap(self):
 
 
 def serve_robots(self):
-    host = self.headers.get("Host", "127.0.0.1:8000")
+    host = public_host(self.headers)
     body = (
         "User-agent: *\n"
         "Allow: /\n"
@@ -556,6 +571,8 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
             return self.api_admin_reports(parsed.query)
         if path.startswith("/uploads/"):
             return self.serve_upload(path)
+        if path == "/config.js":
+            return self.serve_config_js()
         if path in STATIC_FILES:
             if path == "/":
                 return render_index(self, path)
@@ -931,6 +948,22 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
             o["responses"] = responses_by_order.get(o["id"], [])
         return orders
 
+    def serve_config_js(self):
+        """Runtime frontend config (external script: allowed by CSP, not cacheable)."""
+        payload = json_dumps({
+            "wsPort": int(os.environ.get("WS_PORT", "8001")),
+            "dev": is_dev_mode(),
+        })
+        data = b"window.MEBLIO_CONFIG=" + payload + b";"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        for header, value in security_headers(self.headers.get("Host", "")).items():
+            self.send_header(header, value)
+        self.end_headers()
+        self.wfile.write(data)
+
     def serve_static(self, filename):
         path = BASE_DIR / filename
         if not path.exists():
@@ -942,7 +975,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
             self.send_response(304)
             self.send_header("ETag", etag)
             self.send_header("Cache-Control", "public, max-age=3600")
-            for header, value in SECURITY_HEADERS.items():
+            for header, value in security_headers(self.headers.get("Host", "")).items():
                 self.send_header(header, value)
             self.end_headers()
             return
@@ -953,7 +986,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
         self.send_header("ETag", etag)
         self.send_header("Last-Modified", self.date_time_string(int(stat.st_mtime)))
         self.send_header("Cache-Control", "public, max-age=3600")
-        for header, value in SECURITY_HEADERS.items():
+        for header, value in security_headers(self.headers.get("Host", "")).items():
             self.send_header(header, value)
         self.end_headers()
         self.wfile.write(data)
@@ -1017,7 +1050,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                 user = conn.execute("SELECT users.*, regions.name AS region_name FROM users LEFT JOIN regions ON regions.id = users.region_id WHERE users.id = ?", (user_id,)).fetchone()
                 email = user["email"]
                 verify_token = create_pending_token(conn, "email_verifications", user_id, 60 * 24)
-                base_url = f"http://{self.headers.get('Host', '127.0.0.1:8000')}"
+                base_url = public_base_url(self.headers)
                 from mailer import send_email
                 send_email(
                     email,
@@ -1026,7 +1059,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                     link_url=f"{base_url}/api/verify-email?token={verify_token}",
                 )
             payload = {"user": self.public_user(row_to_dict(user))}
-            if os.environ.get("MEBLIO_DEV", "1") == "1":
+            if is_dev_mode():
                 payload["verify_url"] = f"{base_url}/api/verify-email?token={verify_token}"
             self.send_json(200, payload, {"Set-Cookie": f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"})
         except sqlite3.IntegrityError:
@@ -1053,7 +1086,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                 token = secrets.token_urlsafe(32)
                 purge_expired_sessions(conn)
                 conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], now()))
-                trust_value = make_trust_cookie(get_tfa_trust_secret(conn), user["id"]) if tfa else None
+                trust_value = make_trust_cookie(get_tfa_trust_secret(conn), user["id"], user["password_hash"]) if tfa else None
             cookies_to_set = [f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"]
             if trust_value:
                 cookies_to_set.append(f"{TRUST_DEVICE_COOKIE}={trust_value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={TRUST_DEVICE_DAYS * 86400}")
@@ -1930,7 +1963,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
             if user["is_verified"]:
                 return self.send_json(200, {"ok": True, "already_verified": True})
             verify_token = create_pending_token(conn, "email_verifications", user["id"], 60 * 24)
-            base_url = f"http://{self.headers.get('Host', '127.0.0.1:8000')}"
+            base_url = public_base_url(self.headers)
             from mailer import send_email
             send_email(
                 user["email"],
@@ -1939,7 +1972,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                 link_url=f"{base_url}/api/verify-email?token={verify_token}",
             )
             payload = {"ok": True}
-            if os.environ.get("MEBLIO_DEV", "1") == "1":
+            if is_dev_mode():
                 payload["verify_url"] = f"{base_url}/api/verify-email?token={verify_token}"
         self.send_json(200, payload)
 
@@ -1979,7 +2012,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
             token = secrets.token_urlsafe(32)
             purge_expired_sessions(conn)
             conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], now()))
-            trust_value = make_trust_cookie(get_tfa_trust_secret(conn), user["id"])
+            trust_value = make_trust_cookie(get_tfa_trust_secret(conn), user["id"], user["password_hash"])
         self.send_json(200, {"user": self.public_user(row_to_dict(user))}, {"Set-Cookie": [
             f"meblio_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800",
             f"{TRUST_DEVICE_COOKIE}={trust_value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={TRUST_DEVICE_DAYS * 86400}",
@@ -1996,7 +2029,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                 conn.execute(
                     "UPDATE email_verifications SET purpose = 'reset' WHERE token = ?", (token,)
                 )
-                base_url = f"http://{self.headers.get('Host', '127.0.0.1:8000')}"
+                base_url = public_base_url(self.headers)
                 from mailer import send_email
                 send_email(
                     email,
@@ -2059,7 +2092,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                 return self.send_error_json(409, "Этот email уже занят")
             conn.execute("UPDATE users SET email = ?, is_verified = 0 WHERE id = ?", (new_email, user["id"]))
             verify_token = create_pending_token(conn, "email_verifications", user["id"], 60 * 24)
-            base_url = f"http://{self.headers.get('Host', '127.0.0.1:8000')}"
+            base_url = public_base_url(self.headers)
             from mailer import send_email
             send_email(
                 new_email,
@@ -2068,7 +2101,7 @@ class MeblioHandler(AdminMixin, CatalogMixin, AiMixin, BaseHTTPRequestHandler):
                 link_url=f"{base_url}/api/verify-email?token={verify_token}",
             )
             payload = {"ok": True}
-            if os.environ.get("MEBLIO_DEV", "1") == "1":
+            if is_dev_mode():
                 payload["verify_url"] = f"{base_url}/api/verify-email?token={verify_token}"
         self.send_json(200, payload)
 
