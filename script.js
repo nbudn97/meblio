@@ -4790,10 +4790,12 @@ function initAiWidget() {
     input.value = "";
   });
 
-  api("/api/ai/history").then((data) => {
-    const badge = document.querySelector("#aiProviderBadge");
-    if (badge && data.provider === "builtin") badge.textContent = "офлайн-режим";
-  }).catch(() => {});
+  if (getCookie("meblio_session")) {
+    api("/api/ai/history").then((data) => {
+      const badge = document.querySelector("#aiProviderBadge");
+      if (badge && data.provider === "builtin") badge.textContent = "офлайн-режим";
+    }).catch(() => {});
+  }
 }
 
 

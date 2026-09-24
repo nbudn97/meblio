@@ -72,6 +72,7 @@ STATIC_FILES = {
     "/styles.css": "styles.css",
     "/script.js": "script.js",
     "/meblio.png": "meblio.png",
+    "/meblio-512.png": "meblio-512.png",
     "/hero-workshop.png": "hero-workshop.png",
     "/sw.js": "sw.js",
     "/manifest.json": "manifest.json",

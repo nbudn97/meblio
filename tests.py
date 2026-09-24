@@ -342,6 +342,14 @@ class InfraTests(unittest.TestCase):
         self.assertIn("/fonts/fonts.css", html)
         self.assertNotIn("fonts.googleapis.com", html)
 
+    def test_pwa_icons_served(self):
+        c = Client()
+        for path in ("/meblio.png", "/meblio-512.png", "/manifest.json"):
+            status, _, headers = c.request("GET", path)
+            self.assertEqual(status, 200, path)
+            self.assertIn("image" if path.endswith(".png") else "json",
+                          headers.get("Content-Type", ""), path)
+
     def test_missing_asset_404_but_spa_routes_work(self):
         c = Client()
         status, _, _ = c.request("GET", "/missing-image.png")

@@ -516,6 +516,12 @@ NIK2/
 - Ассеты: `styles.css?v=19`, `script.js?v=21`; SW v23
 - Тест: `test_self_hosted_fonts`, CSP без googleapis — **79/79**
 
+### 24.09.2026 — Хвосты: 404 PWA-иконки, чистка консоли
+- `/meblio-512.png` добавлен в `STATIC_FILES` (файл был на диске, манифест/apple-icon ссылались — 404 в консоли)
+- AI-виджет: `/api/ai/history` для бейджа провайдера вызывается только при наличии `meblio_session` (анонимы больше не получают 401 в консоли)
+- Ассеты: `script.js?v=22`; SW **v24** (+ `/meblio-512.png` в STATIC_ASSETS)
+- Тест: `test_pwa_icons_served` — **80/80**
+
 ## Known Issues
 - Email через SMTP требует задания переменных окружения в проде
 - Мультиорганизации, Telegram/MAX-уведомления, 3D-viewer (как у Materix) — в roadmap

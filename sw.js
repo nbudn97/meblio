@@ -1,10 +1,11 @@
-const CACHE_NAME = "meblio-v23";
+const CACHE_NAME = "meblio-v24";
 const STATIC_ASSETS = [
   "/index.html",
   "/styles.css?v=19",
-  "/script.js?v=21",
+  "/script.js?v=22",
   "/fonts/fonts.css",
   "/meblio.png",
+  "/meblio-512.png",
   "/manifest.json",
 ];
 

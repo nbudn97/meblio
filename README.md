@@ -23,7 +23,7 @@ python app.py          # HTTP на :8000, WebSocket на :8001
 ## Тесты
 
 ```bash
-python -m unittest tests -v    # 79 тестов, stdlib only
+python -m unittest tests -v    # 80 тестов, stdlib only
 ```
 
 Тесты изолированы: используют временную БД (`MEBLIO_DB`) и не трогают боевую.
