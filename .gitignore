@@ -8,5 +8,7 @@ __pycache__/
 cookies*.txt
 .mimocode/
 *.log
+meblio.log.*
 _research/
 _design/
+.playwright-mcp/

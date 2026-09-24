@@ -39,6 +39,9 @@ git push -u origin master
 | `MEBLIO_DB` / `MEBLIO_UPLOADS` | пути к БД и загрузкам |
 | `MEBLIO_DEV` | `1` — возвращать verify/reset-ссылки в ответах API. **По умолчанию 0** — в проде не задавать |
 | `SMTP_HOST/PORT/USER/PASSWORD/FROM` | реальная отправка писем; пусто = mock в лог |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot API для уведомлений (chat_id в настройках уведомлений) |
+| `MAX_API_TOKEN` / `MAX_API_BASE` | MAX messenger Bot API (по умолчанию `https://botapi.max.ru`) |
+| `MEBLIO_METRICA_ID` | числовой ID счётчика Яндекс.Метрики; пусто = Метрика выключена |
 
 **WebSocket за nginx**: фронтенд на HTTPS подключается к `wss://<домен>/ws` (проксируется nginx → :8001). Порт 8001 наружу открывать не нужно.
 

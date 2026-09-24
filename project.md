@@ -447,13 +447,81 @@ NIK2/
 - **Доки**: `.env.example`/`DEPLOY.md` — пути `NIK2` → `Meblio`, документированы `MEBLIO_HOST`/`MEBLIO_SCHEME`, дефолт `MEBLIO_DEV=0`, WS через `/ws`
 - Тесты: `DevModeTests`, trusted-device после смены пароля, `/config.js`, динамический CSP; `MEBLIO_HOST=meblio.local` зафиксирован в tests.py
 
+### 23.09.2026 — Политика конфиденциальности и оферта (152-ФЗ)
+- **SPA-страницы** `/privacy` и `/offer` (роуты `privacy`/`offer`, SEO-заголовки в `view_titles`, sitemap `/privacy` + `/offer`)
+- **Тексты документов**: Политика обработки персональных данных (152-ФЗ, оператор — заглушки реквизитов) и Публичная оферта (ст. 437 ГК РФ); перекрёстные ссылки, футер «Правовая информация»
+- **Согласие при регистрации**: чекбокс `consent_pd` (обязательный) + серверная проверка в `api_register` (400 без согласия); миграция `users.consent_pd_at` (TEXT), `create_user(..., consent_pd_at=now())`
+- **Cookie-баннер**: `initCookieBanner()` в `script.js` — уведомление о не-обязательных cookie со ссылкой на политику, отказ/принятие в localStorage
+- **Фикс `[data-nav]`**: глобальный click-хендлер не содержал `[data-nav]` в `closest` — клики по ссылкам футера/документов не работали
+- **Опечатка**: «Данные活動ности» → «Данные активности» в тексте политики
+- Ассеты: `styles.css?v=14`, `script.js?v=17`; SW v18 (`STATIC_ASSETS` → v14/v17)
+- Тесты (58/58): `test_register_requires_consent`, `test_register_stores_consent_timestamp`, `test_privacy_and_offer_spa_seo`, sitemap-проверки `/privacy`+`/offer`; хелпер `Client.register` шлёт `consent_pd=1`
+- Исправлен флак: `test_2fa_login_flow` падал при полном прогоне (TOTP-окно ±1 шаг уже в `verify_totp`; при повторных прогонах — OK)
+
+### 23.09.2026 — Волна P0: ядро сделки (этапы, приёмка, договор, счета, модерация)
+- **Этапы заказа**: таблица `order_stages`, дефолты «Замер/Производство/Проект/Монтаж» при выборе исполнителя; API `GET/POST /api/orders/{id}/stages`, `PUT .../stages/{sid}` (done/delete/rename); UI-чек-лист на карточке заказа (кнопка «Этапы», прогресс-бар, +/- этапы)
+- **Акт приёмки**: `POST /api/orders/{id}/accept` — только заказчик; закрывает `progress → closed` при всех done-этапах, иначе 400; `force: true` — принять с подтверждением; `warranty_until` = +14 дней; уведомление исполнителю
+- **Закрытие с этапами**: `POST .../close` без done-этапов → 400; `force`/admin — в обход; UI предлагает force при ошибке
+- **Договор**: `GET /api/orders/{id}/contract` (реквизиты сторон, этапы, счёт); печатная HTML-версия `openContractPrint()` + кнопка «Договор» на карточке; доступ только участникам/админу
+- **Статусы счетов**: `PUT /api/invoices/{id}` — только участники; transitions `pending→paid|cancelled`, `paid→cancelled`, иначе 409; уведомление контрагенту; кнопки в карточке счёта
+- **Модерация компаний/отзывов**: `users.is_moderation_hidden`, `reviews.is_hidden`; `POST /api/admin/hide` + resolve жалобы с `hide_target`; фильтры в companies/makers/search/sitemap/reviews
+- **Админка**: таб «Жалобы» (`/api/admin/reports`, resolve/reject + скрыть)
+- Миграции: `order_stages`, `ensure_column` users.is_moderation_hidden / verified_requisites_at, orders.warranty_until, reviews.is_hidden
+- UI: этапы/приёмка/договор на order-card, кнопки статуса счёта, таб «Жалобы»; `.stages-*` стили + print media
+- Ассеты: `styles.css?v=15`, `script.js?v=18`; SW v19
+- Тесты: `DealLifecycleTests` (stages/accept/force/contract/invoice), `ModerationP0Tests` (hide company/review), обновлён `test_close_order_by_participants`
+
+### 23.09.2026 — Волна P1: дубли, воронка, дедлайны, сравнение откликов
+- **Дублировать заказ**: `POST /api/orders/{id}/duplicate` (только владелец, rate-limit) — копия как draft с файлами; кнопка «Дублировать» на карточке заказа
+- **Дедлайны**: `orders.due_at` (parse из `deadline` при create/publish), `run_deadline_reminders` (3d/1d/overdue, дедуп через `orders.deadline_notified`), `GET/POST /api/deadlines/check` (admin), daemon-поток в `main()` (каждые 6ч)
+- **Воронка мастера**: `GET /api/maker/funnel` — стадии available/sent/chosen/in_progress/closed/lost; таб «Воронка» в кабинете исполнителя (`loadMakerFunnel`/`makerFunnelView`)
+- **Сравнение откликов**: чекбоксы на откликах, `state.compareResponses`, модалка `compareResponsesView`, кнопки «Сравнить/Сбросить» в `responsesBlock`
+- Миграции: `orders.due_at`, `orders.deadline_notified`
+- Стили: `.funnel-*`, `.compare-*`
+- Ассеты: `styles.css?v=16`, `script.js?v=19`; SW v20
+- Тесты: `P1FeatureTests` (duplicate, due_at+reminders+dedup, funnel) — 68/68; флак `test_2fa_login_flow` — TOTP-окно ±2 + retry по offset
+
+### 23.09.2026 — Волна P2: верификация реквизитов, гарантия, калькулятор сметы
+- **Верификация реквизитов**: `POST /api/admin/verify-requisites` (только admin) — `users.verified_requisites_at`; смена ИНН/ОГРН в профиле снимает отметку; бейдж «✓ Реквизиты проверены» на карточке компании и в профиле; кнопки админа «Подтвердить/Снять» в блоке реквизитов
+- **Гарантия 14 дней**: бейдж на карточке заказа (`warranty_until`, активна/истекла) через `warrantyActive()`; API уже ставит `warranty_until` при accept/close (P0)
+- **Калькулятор сметы**: `POST /api/estimate` — размеры (мм), материал из каталога или свой, сложность (simple/medium/complex ×1.0/1.25/1.5), фурнитура (basic/standard/premium); разбивка материалы/сборка/фурнитура, итог за единицу и общая; таб «Калькулятор» в кабинете обеих ролей (`estimateView`/`runEstimate`)
+- `public_user` отдаёт `verified_requisites_at`
+- Стили: `.estimate-result`, `.badge-verified`
+- Ассеты: `styles.css?v=17`, `script.js?v=20`; SW v21
+- Тесты: `P2FeatureTests` (verify+clear-on-change+permissions, estimate calc/validation/404, warranty_until в closed) — **71/71**; флак `test_2fa_login_flow` — retry при «Сессия входа истекла» + TOTP offset ±1
+
+### 23.09.2026 — Волна P3: параметры услуг, КП, тарифы, Telegram/MAX
+- **Параметры услуг**: таблица `service_params` (name/value/sort); CRUD через create/update service (JSON `params`); отдача в list/detail; UI-редактор в форме услуги + бейджи-строки на карточке/странице услуги
+- **КП (коммерческое предложение)**: таблица `proposals` (amount, days, message, items JSON, status sent/accepted/rejected); `POST/GET /api/orders/{id}/proposals`, `POST /api/proposals/{id}/status`; принятие КП = выбор исполнителя + этапы; UI: «Отправить КП»/«КП» на карточке заказа, модалка создания со списком позиций, список с Принять/Отклонить
+- **Тарифы Free/Pro**: `users.plan` (default free); free — 5 откликов/мес (проверка в `api_create_response`); `GET /api/tariff`, `POST /api/tariff/upgrade` (статусный billing без провайдера); публичная SPA-страница **`/tariffs`** (SEO, sitemap, footer); ссылка из обзора кабинета
+- **Telegram/MAX**: `users.telegram_chat_id` / `users.max_chat_id`; `POST /api/messenger/link`; в `create_notification` — fire-and-forget `send_telegram_message` / `send_max_message` (`TELEGRAM_BOT_TOKEN`, `MAX_API_TOKEN`, `MAX_API_BASE` в `.env.example`); поля в настройках уведомлений
+- `public_user`: `plan`, `telegram_chat_id`, `max_chat_id`
+- Стили: `.service-params*`, `.proposal-*`, `.tariff-*`
+- Ассеты: `styles.css?v=18`, `script.js?v=21`; SW v22
+- Тесты: `P3FeatureTests` (params CRUD, free quota + upgrade, proposal create/accept, messenger link, `/tariffs` SEO)
+
+### 23.09.2026 — Волна P4: сплит app.py, Яндекс.Метрика/CSP, дока
+- **Сплит `app.py`** (1070 строк): `api_orders.py` (`OrderMixin` — заказы, этапы, КП, воронка, дедлайны, estimate, export), `api_accounts.py` (`AccountMixin` — auth/2FA/profile/уведомления/тарифы/messenger/favorites/документы), `api_market.py` (`MarketMixin` — компании, услуги, отзывы, поиск, статьи, чат, жалобы), `auth_util.py` (TOTP, trusted devices, pending-токены, CSRF); `MeblioHandler` = Account/Order/Market/Admin/Catalog/Ai mixins
+- Фикс сплита: восстановлены `@staticmethod` у `_warranty_date` / `_due_at` / `run_deadline_reminders` в `api_orders.py`
+- Фикс гонки: `send_json` после записи, но до commit вынесен **за** `with connect()` — `api_create_service`, `api_login` (tfa_required), `api_update_order_stage` (delete), `api_add_favorite`, `api_upload_document`, `api_upload_logo`, `api_create_certificate` (ответ уходил клиенту до commit → следующий запрос не видел запись)
+- **Яндекс.Метрика + CSP**: инлайн-сниппет заменён на внешний `/metrica.js` (`serve_metrica_js`, `Cache-Control: no-store`, 404 без id, 400 если не число); тег инжектится в `render_index` при `MEBLIO_METRICA_ID`; CSP условно добавляет `mc.yandex.ru`/`mc.yandex.net` в script-src/img-src/connect-src только когда id задан; `/metrica.js` не в STATIC_FILES и не в SW-прекэше; env: `MEBLIO_METRICA_ID` в `.env.example`
+- **Дока**: `README.md` переписан (новая структура файлов, 78 тестов, env); `docs/DEPLOY.md` — строки `TELEGRAM_BOT_TOKEN`, `MAX_API_*`, `MEBLIO_METRICA_ID`
+- Ассеты P4 не менялись (клиент не трогался)
+- Тесты: +3 в `ConfigJsTests` (metrica off / external+CSP / non-numeric 400) — **78/78**
+
+### 23.09.2026 — Self-hosted шрифты + фикс SW/HTML-кэша
+- Google Fonts убраны; Inter + Comfortaa (woff2 subsets) в `fonts/` + `fonts/fonts.css`; CSP `style-src`/`font-src` только `'self'`
+- `render_index` и `/index.html` → `Cache-Control: no-store` (HTML больше не залипает со старыми `?v=`); `sw.js` тоже `no-store` (иначе браузер держал старый SW cache-first)
+- SW **v23**: network-first для navigate/`/index.html`, без прекэша `/`, `/fonts/fonts.css` в STATIC_ASSETS
+- Ассеты: `styles.css?v=19`, `script.js?v=21`; SW v23
+- Тест: `test_self_hosted_fonts`, CSP без googleapis — **79/79**
+
 ## Known Issues
 - Email через SMTP требует задания переменных окружения в проде
 - Мультиорганизации, Telegram/MAX-уведомления, 3D-viewer (как у Materix) — в roadmap
 - AI-ассистент без `AI_API_KEY` работает в офлайн-режиме (rule-based, без свободного диалога)
-- Модерация компаний/отзывов (is_hidden только у заказов/услуг)
-- Inline-скрипт Яндекс.Метрики блокируется CSP `script-src 'self'` — при `MEBLIO_METRICA_ID` метрика не грузится (нужен nonce/hash)
-- app.py ~2400 строк
+- app.py ~1070 строк (после сплита P4; логика — в api_orders/api_accounts/api_market/auth_util)
+- Оплаты — только статусы счетов (без платёжного провайдера)
 
 ## Следующие шаги
 - [x] Уведомления (email/push)

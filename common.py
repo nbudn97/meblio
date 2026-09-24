@@ -179,3 +179,61 @@ def create_notification(conn, user_id, ntype, title, body="", link=""):
     if prefs and prefs["email_enabled"]:
         from logger import get_logger
         get_logger("notify").info("[EMAIL NOTIFICATION] To user %s: %s — %s", user_id, title, body)
+
+    # External messengers (Telegram / MAX) — fire-and-forget
+    try:
+        row = conn.execute(
+            "SELECT telegram_chat_id, max_chat_id FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if row:
+            text = f"{title}\n{body}".strip()
+            if row["telegram_chat_id"]:
+                send_telegram_message(row["telegram_chat_id"], text)
+            if row["max_chat_id"]:
+                send_max_message(row["max_chat_id"], text)
+    except Exception:
+        pass
+
+
+def send_telegram_message(chat_id, text):
+    import os as _os
+    token = (_os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token or not chat_id:
+        return False
+    import json as _json
+    import urllib.request as _ur
+    try:
+        payload = _json.dumps({"chat_id": str(chat_id), "text": text[:4000]}).encode("utf-8")
+        req = _ur.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _ur.urlopen(req, timeout=5):
+            return True
+    except Exception:
+        return False
+
+
+def send_max_message(chat_id, text):
+    import os as _os
+    token = (_os.environ.get("MAX_API_TOKEN") or "").strip()
+    if not token or not chat_id:
+        return False
+    import json as _json
+    import urllib.request as _ur
+    try:
+        base = (_os.environ.get("MAX_API_BASE") or "https://botapi.max.ru").rstrip("/")
+        payload = _json.dumps({"chat_id": str(chat_id), "text": text[:4000]}).encode("utf-8")
+        req = _ur.Request(
+            f"{base}/messages",
+            data=payload,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="POST",
+        )
+        with _ur.urlopen(req, timeout=5):
+            return True
+    except Exception:
+        return False

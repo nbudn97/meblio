@@ -1,5 +1,12 @@
-const CACHE_NAME = "meblio-v17";
-const STATIC_ASSETS = ["/", "/index.html", "/styles.css?v=13", "/script.js?v=16", "/meblio.png", "/manifest.json"];
+const CACHE_NAME = "meblio-v23";
+const STATIC_ASSETS = [
+  "/index.html",
+  "/styles.css?v=19",
+  "/script.js?v=21",
+  "/fonts/fonts.css",
+  "/meblio.png",
+  "/manifest.json",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -23,8 +30,30 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
   // Runtime config: always fresh, never cached
-  if (url.pathname === "/config.js") {
+  if (url.pathname === "/config.js" || url.pathname === "/metrica.js") {
     event.respondWith(fetch(event.request));
+    return;
+  }
+
+  // HTML shell: network-first so asset query-versions never go stale
+  if (
+    event.request.mode === "navigate" ||
+    url.pathname === "/" ||
+    url.pathname === "/index.html"
+  ) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          const clone = response.clone();
+          if (response.ok) {
+            caches.open(CACHE_NAME).then((cache) => cache.put("/index.html", clone));
+          }
+          return response;
+        })
+        .catch(() =>
+          caches.match("/index.html").then((cached) => cached || Response.error())
+        )
+    );
     return;
   }
 

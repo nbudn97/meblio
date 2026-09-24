@@ -500,11 +500,18 @@ class AdminMixin:
             if not report or report["status"] != "pending":
                 return self.send_error_json(404, "Жалоба не найдена или уже обработана")
             conn.execute("UPDATE reports SET status = ? WHERE id = ?", (status, report_id))
-            if hide_target and report["target_type"] in ("order", "service"):
-                table = "orders" if report["target_type"] == "order" else "services"
-                conn.execute(f"UPDATE {table} SET is_hidden = 1 WHERE id = ?", (report["target_id"],))
-                self.log_admin_activity(conn, admin["id"], "hide_content", report["target_type"],
-                                        report["target_id"], f"Скрыто из жалобы #{report_id}")
+            if hide_target:
+                if report["target_type"] == "order":
+                    conn.execute("UPDATE orders SET is_hidden = 1 WHERE id = ?", (report["target_id"],))
+                elif report["target_type"] == "service":
+                    conn.execute("UPDATE services SET is_hidden = 1 WHERE id = ?", (report["target_id"],))
+                elif report["target_type"] == "company":
+                    conn.execute("UPDATE users SET is_moderation_hidden = 1 WHERE id = ?", (report["target_id"],))
+                elif report["target_type"] == "review":
+                    conn.execute("UPDATE reviews SET is_hidden = 1 WHERE id = ?", (report["target_id"],))
+                if report["target_type"] in ("order", "service", "company", "review"):
+                    self.log_admin_activity(conn, admin["id"], "hide_content", report["target_type"],
+                                            report["target_id"], f"Скрыто из жалобы #{report_id}")
             self.log_admin_activity(conn, admin["id"], "resolve_report", "report", report_id,
                                     f"Жалоба #{report_id} -> {status}")
         self.send_json(200, {"ok": True})

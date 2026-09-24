@@ -29,6 +29,10 @@ const state = {
   activeCompanyId: null,
   favorites: [],
   adminTab: "overview",
+  adminReports: [],
+  adminReportsTotal: 0,
+  compareResponses: [],
+  makerFunnel: null,
   adminStats: null,
   adminAnalytics: null,
   adminActivity: [],
@@ -250,6 +254,7 @@ const VIEW_PATHS = {
   home: "/", market: "/market", companies: "/companies", services: "/services",
   articles: "/articles", notifications: "/notifications",
   dashboard: "/dashboard", admin: "/admin", company: "/companies", service: "/services",
+  privacy: "/privacy", offer: "/offer", tariffs: "/tariffs",
 };
 
 function parseRoute(path) {
@@ -262,11 +267,15 @@ function parseRoute(path) {
     [/^\/services\/(\d+)\/?$/, (m) => ({ view: "service", serviceId: Number(m[1]) })],
     [/^\/articles\/?$/, () => ({ view: "articles" })],
     [/^\/articles\/([\w-]+)\/?$/, (m) => ({ view: "article", articleSlug: m[1] })],
+    [/^\/privacy\/?$/, () => ({ view: "privacy" })],
+    [/^\/offer\/?$/, () => ({ view: "offer" })],
+    [/^\/tariffs\/?$/, () => ({ view: "tariffs" })],
     [/^\/chat\/?$/, () => ({ view: "dashboard", tab: "chats" })],
     [/^\/dashboard(?:\/([a-z-]+))?\/?$/i, (m) => ({ view: "dashboard", tab: m[1] || "overview" })],
     [/^\/notifications\/?$/, () => ({ view: "notifications" })],
     [/^\/admin(?:\/([a-z-]+))?\/?$/i, (m) => ({ view: "admin", tab: m[1] || "overview" })],
     [/^\/orders\/(\d+)\/?$/, () => ({ view: "dashboard", tab: "my-orders" })],
+    [/^\/orders\/(\d+)\/contract\/?$/, () => ({ view: "dashboard", tab: "my-orders" })],
   ];
   for (const [re, fn] of routes) {
     const m = path.match(re);
@@ -649,6 +658,88 @@ function starRating(rating, interactive = false) {
   return html;
 }
 
+async function loadOrderStagesInto(orderId, panel) {
+  try {
+    const data = await api(`/api/orders/${orderId}/stages`);
+    const stages = data.stages || [];
+    const order = state.orders.find(o => o.id === Number(orderId));
+    const isParticipant = order && state.user && (state.user.id === order.client_id || state.user.id === order.selected_maker_id || state.user.role === "admin");
+    panel.innerHTML = `
+      <div class="stages-box">
+        <div class="stages-head">
+          <strong>Этапы работы</strong>
+          ${isParticipant && order?.status === "progress" ? `<button class="button button-secondary button-small" type="button" data-add-stage="${orderId}">+ Этап</button>` : ""}
+        </div>
+        ${stages.length ? `
+          <ul class="stages-list">
+            ${stages.map(s => `
+              <li class="stages-item ${s.done ? "is-done" : ""}">
+                ${isParticipant && order?.status === "progress" ? `
+                  <label class="stages-check">
+                    <input type="checkbox" ${s.done ? "checked" : ""} data-stage-toggle="${orderId}:${s.id}:${s.done ? 1 : 0}">
+                    <span>${escapeHtml(s.name)}</span>
+                  </label>` : `<span>${escapeHtml(s.name)}</span>`}
+                <span class="stages-meta">
+                  ${s.done ? `✓ ${escapeHtml((s.done_by_name || "") + (s.done_at ? ` · ${s.done_at.slice(0, 10)}` : ""))}` : "в работе"}
+                  ${isParticipant && order?.status === "progress" ? `<button class="stages-del" type="button" data-stage-delete="${orderId}:${s.id}" title="Удалить">×</button>` : ""}
+                </span>
+              </li>
+            `).join("")}
+          </ul>
+          <div class="stages-progress"><div class="stages-progress-fill" style="width:${Math.round((stages.filter(s => s.done).length / stages.length) * 100)}%"></div></div>
+          <p class="muted">${stages.filter(s => s.done).length} из ${stages.length} этапов завершено</p>
+        ` : '<p class="muted">Этапы появятся, когда заказ переведут в работу.</p>'}
+      </div>`;
+  } catch (error) {
+    panel.innerHTML = `<div class="stages-box"><p class="muted">${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function openContractPrint(c) {
+  const stageRows = (c.stages || []).map(s =>
+    `<tr><td>${escapeHtml(s.name)}</td><td>${s.done ? "выполнен" : "в работе"}</td><td>${escapeHtml(s.done_at || "—")}</td></tr>`
+  ).join("") || '<tr><td colspan="3">Этапы не заданы</td></tr>';
+  const inv = c.invoice;
+  const esc = escapeHtml;
+  const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Договор ${esc(String(c.id))} — Meblio</title>
+    <style>
+      body{font-family:Georgia,serif;max-width:800px;margin:40px auto;padding:0 24px;color:#111;line-height:1.5}
+      h1{font-size:22px;text-align:center}h2{font-size:16px;margin-top:28px}
+      table{width:100%;border-collapse:collapse;margin:12px 0}td,th{border:1px solid #999;padding:6px 8px;text-align:left;font-size:13px}
+      th{background:#f3f3f3}.sig{display:flex;justify-content:space-between;margin-top:48px;gap:24px}
+      .sig div{flex:1;border-top:1px solid #111;padding-top:6px;font-size:12px}
+      @media print{body{margin:20px auto}}
+    </style></head><body>
+    <h1>Договор подряда № ${esc(String(c.id))}<br>на изготовление мебели</h1>
+    <p>г. ${esc(c.client_city || c.city || "—")}&emsp;&emsp;&emsp;«${esc((c.created_at || "").slice(0, 10))}»</p>
+    <h2>1. Стороны</h2>
+    <table>
+      <tr><th style="width:30%">Заказчик</th><td>${esc(c.client_name)}${c.client_inn ? `, ИНН ${esc(c.client_inn)}` : ""}${c.client_ogrn ? `, ОГРН/ОГРНИП ${esc(c.client_ogrn)}` : ""}<br>${esc(c.client_email || "")}, ${esc(c.client_phone || "")}</td></tr>
+      <tr><th>Исполнитель</th><td>${esc(c.maker_name || "не выбран")}${c.maker_inn ? `, ИНН ${esc(c.maker_inn)}` : ""}${c.maker_ogrn ? `, ОГРН/ОГРНИП ${esc(c.maker_ogrn)}` : ""}<br>${esc(c.maker_email || "")}, ${esc(c.maker_phone || "")}</td></tr>
+    </table>
+    <h2>2. Предмет договора</h2>
+    <p>Изготовление и поставка мебели: <strong>${esc(c.title)}</strong> (${esc(c.type)}), ${esc(String(c.quantity))} шт., г. ${esc(c.city)}.<br>
+    Описание: ${esc(c.details || "—")}<br>
+    Срок исполнения: ${esc(c.deadline || "—")}. Бюджет: ${Number(c.budget || 0).toLocaleString("ru-RU")} руб.</p>
+    ${c.selected_maker_id ? `<p>Статус заказа: <strong>${esc(c.status)}</strong>${c.warranty_until ? `, гарантия до ${esc(c.warranty_until)}` : ""}.</p>` : ""}
+    <h2>3. Этапы работ</h2>
+    <table><thead><tr><th>Этап</th><th>Статус</th><th>Дата</th></tr></thead><tbody>${stageRows}</tbody></table>
+    ${inv ? `<h2>4. Расчёты</h2><p>Счёт № ${esc(String(inv.id))} на ${Number(inv.amount).toLocaleString("ru-RU")} руб., статус: <strong>${esc(inv.status)}</strong>${inv.due_date ? `, срок оплаты ${esc(inv.due_date)}` : ""}.</p>` : "<h2>4. Расчёты</h2><p>Счёт не выставлен.</p>"}
+    <h2>5. Ответственность сторон</h2>
+    <p>Стороны обязуются соблюдать сроки и условия настоящего договора. Приёмка работ оформляется актом приёмки в личном кабинете Meblio. Гарантийный срок — 14 дней с даты приёмки.</p>
+    <div class="sig">
+      <div>Заказчик: ${esc(c.client_name)} / подпись</div>
+      <div>Исполнитель: ${esc(c.maker_name || "")} / подпись</div>
+    </div>
+    <p style="margin-top:32px;color:#666;font-size:12px">Документ сформирован на площадке Meblio. Для печати используйте меню печати браузера.</p>
+    <script>window.onload = function(){ setTimeout(function(){ window.print(); }, 400); };</script>
+    </body></html>`;
+  const win = window.open("", "_blank");
+  if (!win) { showToast("Разрешите всплывающие окна для печати договора"); return; }
+  win.document.write(html);
+  win.document.close();
+}
+
 function exportOrderHTML(order) {
   const rows = [
     ['Название', order.title],
@@ -725,6 +816,14 @@ function renderHome() {
     </section>`;
 }
 
+function warrantyActive(until) {
+  if (!until) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(`${String(until).slice(0, 10)}T00:00:00`);
+  return !Number.isNaN(end.getTime()) && end >= today;
+}
+
 function orderCard(order, showActions = true) {
   const user = state.user;
   const alreadyResponded = order.responses?.some((r) => r.maker_id === user?.id);
@@ -750,6 +849,7 @@ function orderCard(order, showActions = true) {
         <span>${escapeHtml(order.city)}</span>
         <span>${escapeHtml(order.deadline)}</span>
         <span>${escapeHtml(order.client_name || "Заказчик")}</span>
+        ${order.warranty_until ? `<span class="badge ${warrantyActive(order.warranty_until) ? "badge-paid" : "badge-cancelled"}">Гарантия до ${escapeHtml(order.warranty_until)}${warrantyActive(order.warranty_until) ? " ✓" : " (истекла)"}</span>` : ""}
       </div>
       ${order.files?.length ? `<ul class="chips">${order.files.map((f) => `<li><a href="${f.url}" target="_blank" rel="noreferrer">${escapeHtml(f.name)}</a></li>`).join("")}</ul>` : ""}
       ${order.selected_maker_name ? `<p class="muted">Исполнитель: <strong>${escapeHtml(order.selected_maker_name)}</strong></p>` : ""}
@@ -759,11 +859,18 @@ function orderCard(order, showActions = true) {
         ${canChoose ? `<button class="button button-secondary button-small" type="button" data-scroll-responses="${order.id}">Отклики: ${order.responses?.length || 0}</button>` : ""}
         ${(user?.id === order.client_id && (order.status === "open" || order.status === "progress")) ? `<button class="button button-secondary button-small" type="button" data-cancel-order="${order.id}">Отменить</button>` : ""}
         ${(order.status === "progress" && (user?.id === order.client_id || user?.id === order.selected_maker_id)) ? `<button class="button button-primary button-small" type="button" data-close-order="${order.id}">Завершить</button>` : ""}
+        ${(order.status === "progress" && (user?.id === order.client_id || user?.id === order.selected_maker_id)) ? `<button class="button button-secondary button-small" type="button" data-toggle-stages="${order.id}">Этапы</button>` : ""}
+        ${(order.status === "progress" && user?.id === order.client_id) ? `<button class="button button-primary button-small" type="button" data-accept-order="${order.id}">Принять работу</button>` : ""}
+        ${(user?.id === order.client_id || user?.id === order.selected_maker_id) ? `<button class="button button-secondary button-small" type="button" data-order-contract="${order.id}">Договор</button>` : ""}
+        ${(user?.role === "maker" && (order.status === "open" || order.status === "progress") && (order.responses?.some((r) => r.maker_id === user.id) || order.selected_maker_id === user.id)) ? `<button class="button button-secondary button-small" type="button" data-create-proposal="${order.id}">Отправить КП</button>` : ""}
+        ${user && (user.id === order.client_id || user.id === order.selected_maker_id || order.responses?.some((r) => r.maker_id === user.id)) ? `<button class="button button-secondary button-small" type="button" data-list-proposals="${order.id}">КП</button>` : ""}
+        ${user?.id === order.client_id ? `<button class="button button-secondary button-small" type="button" data-duplicate-order="${order.id}" title="Создать копию как черновик">Дублировать</button>` : ""}
         <button class="button button-secondary button-small" type="button" data-export-order="${order.id}" title="Экспорт в PDF">📥</button>
         <button class="button button-secondary button-small" type="button" data-delivery-history="${order.id}" title="Доставка">🚚</button>
         <button class="button button-secondary button-small" type="button" data-order-history="${order.id}" title="История">📋</button>
         <button class="button button-secondary button-small" type="button" data-report-order="${order.id}" title="Пожаловаться">⚠</button>
       </div>` : ""}
+      <div class="stages-panel" id="stages-${order.id}" hidden></div>
     </article>`;
 }
 
@@ -841,6 +948,7 @@ function renderCompanyProfile(company) {
             <p class="eyebrow">Профиль компании</p>
             <h1>${escapeHtml(company.name)}</h1>
             <p class="lead">${companyTypeLabel(company.company_type)} · ${escapeHtml(company.city)} ${company.region_name ? "· " + escapeHtml(company.region_name) : ""}</p>
+            ${company.verified_requisites_at ? '<p><span class="badge badge-paid">✓ Реквизиты проверены</span></p>' : ''}
             ${!company.is_public && state.user && (state.user.id === company.id || state.user.role === "admin") ? '<p><span class="badge" style="margin-top:6px">Профиль скрыт из каталога</span></p>' : ''}
             ${rating ? `<div class="rating-row">${rating} <span class="muted">(${company.reviews_count || 0} отзывов, среднее ${company.avg_rating})</span></div>` : ''}
           </div>
@@ -863,6 +971,12 @@ function renderCompanyProfile(company) {
                 ${company.region_name ? `<div><dt>Регион</dt><dd>${escapeHtml(company.region_name)}</dd></div>` : ""}
                 ${company.website ? `<div><dt>Веб-сайт</dt><dd><a href="${escapeHtml(company.website)}" target="_blank" rel="noreferrer">${escapeHtml(company.website)}</a></dd></div>` : ""}
               </dl>
+              ${state.user?.role === "admin" && (company.inn || company.ogrn) ? `
+                <div class="actions" style="margin-top:12px">
+                  ${company.verified_requisites_at
+                    ? `<button class="button button-secondary button-small" type="button" data-verify-requisites="${company.id}:0">Снять отметку</button>`
+                    : `<button class="button button-primary button-small" type="button" data-verify-requisites="${company.id}:1">Подтвердить реквизиты</button>`}
+                </div>` : ""}
             </div>` : ""}
             <div class="panel">
               <h2>Услуги (${company.services?.length || 0})</h2>
@@ -1000,8 +1114,8 @@ function renderDashboard() {
   if (!state.user) return openAuth("login");
   const isClient = state.user.role === "client";
   const tabs = isClient
-    ? [["overview", "Обзор"], ["notifications", `Уведомления${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}`], ["new-order", "Создать заказ"], ["my-orders", "Мои заказы"], ["templates", "Шаблоны"], ["invoices", "Счета"], ["materials", "Материалы"], ["suppliers", "Поставщики"], ["certificates", "Сертификаты"], ["time", "Время"], ["favorites", "Избранные"], ["chats", "Сообщения"], ["security", "Безопасность"], ["profile", "Профиль"]]
-    : [["overview", "Обзор"], ["notifications", `Уведомления${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}`], ["available", "Доступные заказы"], ["responses", "Мои отклики"], ["my-services", "Мои услуги"], ["analytics", "Аналитика"], ["invoices", "Счета"], ["materials", "Материалы"], ["suppliers", "Поставщики"], ["time", "Время"], ["favorites", "Избранные"], ["chats", "Сообщения"], ["security", "Безопасность"], ["profile", "Профиль"]];
+    ? [["overview", "Обзор"], ["notifications", `Уведомления${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}`], ["new-order", "Создать заказ"], ["my-orders", "Мои заказы"], ["estimate", "Калькулятор"], ["templates", "Шаблоны"], ["invoices", "Счета"], ["materials", "Материалы"], ["suppliers", "Поставщики"], ["certificates", "Сертификаты"], ["time", "Время"], ["favorites", "Избранные"], ["chats", "Сообщения"], ["security", "Безопасность"], ["profile", "Профиль"]]
+    : [["overview", "Обзор"], ["notifications", `Уведомления${state.unreadCount ? ' (' + state.unreadCount + ')' : ''}`], ["available", "Доступные заказы"], ["responses", "Мои отклики"], ["funnel", "Воронка"], ["estimate", "Калькулятор"], ["my-services", "Мои услуги"], ["analytics", "Аналитика"], ["invoices", "Счета"], ["materials", "Материалы"], ["suppliers", "Поставщики"], ["time", "Время"], ["favorites", "Избранные"], ["chats", "Сообщения"], ["security", "Безопасность"], ["profile", "Профиль"]];
   app.innerHTML = `
     <section class="dashboard">
       <div class="container">
@@ -1028,6 +1142,8 @@ function dashboardContent() {
   if (state.dashboardTab === "my-orders") return myOrders();
   if (state.dashboardTab === "available") return availableOrders();
   if (state.dashboardTab === "responses") return myResponses();
+  if (state.dashboardTab === "funnel") return makerFunnelView();
+  if (state.dashboardTab === "estimate") return estimateView();
   if (state.dashboardTab === "my-services") return myServices();
   if (state.dashboardTab === "favorites") return myFavorites();
   if (state.dashboardTab === "chats") return chatView();
@@ -1089,6 +1205,7 @@ async function servicesCatalogView() {
               ${s.price_type ? `<span class="badge">${escapeHtml(s.price_type)}</span>` : ""}
             </div>
             <p>${escapeHtml(s.description)}</p>
+            ${(s.params || []).length ? `<dl class="service-params">${s.params.map((p) => `<div><dt>${escapeHtml(p.name)}</dt><dd>${escapeHtml(p.value)}</dd></div>`).join("")}</dl>` : ""}
             <div class="actions">
               <a class="button button-secondary button-small" href="/companies/${s.user_id}" data-nav>Открыть компанию</a>
             </div>
@@ -1111,7 +1228,9 @@ async function servicePageView(serviceId) {
       <h1>${escapeHtml(service.title)}</h1>
       <p class="lead">${escapeHtml(service.company_name || "")} · ${escapeHtml(service.company_city || "")}${service.price_type ? " · " + escapeHtml(service.price_type) : ""}</p>
       ${(service.files || []).length ? `<ul class="chips">${service.files.map((f) => `<li><a href="${f.url}" target="_blank" rel="noreferrer">${escapeHtml(f.name)}</a></li>`).join("")}</ul>` : ""}
-      <div class="panel"><p>${escapeHtml(service.description)}</p></div>
+      <div class="panel"><p>${escapeHtml(service.description)}</p>
+        ${(service.params || []).length ? `<dl class="service-params">${service.params.map((p) => `<div><dt>${escapeHtml(p.name)}</dt><dd>${escapeHtml(p.value)}</dd></div>`).join("")}</dl>` : ""}
+      </div>
       <div class="actions">
         <a class="button button-primary" href="/companies/${service.user_id}" data-nav>Открыть компанию</a>
         <a class="button button-secondary" href="/market" data-nav>Найти заказы</a>
@@ -1168,6 +1287,240 @@ async function articlePageView(slug) {
     </div></section>`;
 }
 
+function privacyView() {
+  return `
+    <section class="section"><div class="container legal-page">
+      <p class="breadcrumbs"><a href="/" data-nav>Главная</a> / Политика конфиденциальности</p>
+      <p class="eyebrow">Правовая информация</p>
+      <h1>Политика конфиденциальности</h1>
+      <p class="muted legal-updated">Редакция от 23 сентября 2026 года</p>
+      <div class="panel legal-body">
+        <h2>1. Общие положения</h2>
+        <p>Настояшая Политика конфиденциальности определяет порядок обработки и защиты персональных данных пользователей сайта и сервиса Meblio (далее — «Сайт», «Площадка») и размещена в целях обеспечения неограниченного доступа к информации об обработке персональных данных в соответствии с Федеральным законом от 27.07.2006 № 152-ФЗ «О персональных данных» (далее — 152-ФЗ).</p>
+        <p>Использование Сайта, регистрация аккаунта и заполнение форм означают ознакомление с настоящей Политикой. Согласие на обработку персональных данных пользователь даёт отдельно при регистрации.</p>
+
+        <h2>2. Оператор персональных данных</h2>
+        <p>Оператором персональных данных является:</p>
+        <ul>
+          <li>наименование: <strong>[ООО «Меблио» / ИП — подставить реквизиты]</strong>;</li>
+          <li>ИНН: <strong>[указать ИНН]</strong>;</li>
+          <li>ОГРН/ОГРНИП: <strong>[указать]</strong>;</li>
+          <li>адрес: <strong>[юридический и/или фактический адрес]</strong>;</li>
+          <li>email для обращений по вопросам персональных данных: <strong>[pd@meblio.ru / указать email]</strong>.</li>
+        </ul>
+        <p>Заполните реквизиты оператора перед публикацией Политики в боевой среде.</p>
+
+        <h2>3. Какие персональные данные обрабатываются</h2>
+        <p>В зависимости от действий пользователя Площадка может обрабатывать:</p>
+        <ul>
+          <li><strong>Данные аккаунта:</strong> email, имя или название компании, пароль (хранится в виде соли и хеша, в открытом виде не сохраняется), роль (заказчик/производитель), город, регион, тип компании, компетенции и описание;</li>
+          <li><strong>Контактные и реквизиты профиля:</strong> телефон, сайт, ИНН, ОГРН, признак публичности профиля;</li>
+          <li><strong>Данные активности на Площадке:</strong> заказы и заявки, отклики, сообщения чата, файлы к заказам и сообщениям, услуги, галерея и документы компании, отзывы и рейтинги, избранные компании, счета, история уведомлений;</li>
+          <li><strong>Технические данные:</strong> IP-адрес, данные браузера и устройства, cookie (см. раздел 8), даты и время действий — для безопасности, антифрод-проверок и работы сервиса;</li>
+          <li><strong>Данные AI-ассистента:</strong> тексты обращений и ответов ассистента, история диалога;</li>
+          <li><strong>Данные для писем:</strong> email, используемый для подтверждения адреса, восстановления пароля и служебных уведомлений.</li>
+        </ul>
+        <p>Специальные категории персональных данных (ст. 10 152-ФЗ) и биометрические персональные данные Площадкой не обрабатываются.</p>
+
+        <h2>4. Цели обработки персональных данных</h2>
+        <ul>
+          <li>заключение и исполнение договора пользования Площадкой (публичной оферты);</li>
+          <li>идентификация пользователя, создание и ведение аккаунта, аутентификация, включая двухфакторную;</li>
+          <li>обеспечение работы маркетплейса: размещение заказов, отклики, переписка, рейтинги, счета;</li>
+          <li>направление служебных писем и уведомлений (подтверждение email, восстановление пароля, статусы заказов);</li>
+          <li>обеспечение безопасности, предотвращение злоупотреблений, rate limiting, техническое обслуживание и анализ ошибок;</li>
+          <li>исполнение требований законодательства РФ и ответы на законные запросы уполномоченных органов;</li>
+          <li>при включённом AI-ассистенте — формирование ответов на запросы пользователя.</li>
+        </ul>
+
+        <h2>5. Правовые основания обработки</h2>
+        <ul>
+          <li>согласие субъекта персональных данных (ст. 9, п. 1 ч. 1 ст. 6 152-ФЗ) — даётся при регистрации отдельным действием;</li>
+          <li>заключение и исполнение договора (п. 5 ч. 1 ст. 6 152-ФЗ) — п. 2 ст. 432, ст. 437 ГК РФ;</li>
+          <li>выполнение обязанностей, предусмотренных законом (п. 2 ч. 1 ст. 6, ст. 6.1, 11, 14 152-ФЗ, ФЗ-149 «Об информации»).</li>
+        </ul>
+
+        <h2>6. Действия с персональными данными и передача третьим лицам</h2>
+        <p>Обработка включает сбор, запись, систематизацию, накопление, хранение, уточнение (обновление, изменение), извлечение, использование, обезличивание, блокирование, удаление, уничтожение — в объёме, необходимом для целей из раздела 4, автоматизированным и/или смешанным способом.</p>
+        <p>Для работы сервиса данные могут передаваться лицам, обрабатывающим данные <strong>по поручению оператора</strong> (ст. 6, ст. 6.1 152-ФЗ), в частности:</p>
+        <ul>
+          <li>хостинг-провайдер, на серверах которого размещён Сайт (в т.ч. в Российской Федерации);</li>
+          <li>провайдер SMTP-рассылок для отправки писем;</li>
+          <li>при включённой интеграции AI — внешний провайдер LLM-API (передача текста диалога и служебного контекста профиля);</li>
+          <li>при включённой Яндекс.Метрике — оператор веб-аналитики;</li>
+          <li>государственные органы — в случаях, установленных законом.</li>
+        </ul>
+        <p>Трансграничная передача персональных данных (ст. 12 152-ФЗ) не осуществляется, если внешние AI/аналитика отключены. При их включении передача возможна получателям, указанным в настройках интеграций; отдельное согласие на трансграничную передачу запрашивается дополнительно, если это требуется законом.</p>
+
+        <h2>7. Сроки хранения и удаление</h2>
+        <ul>
+          <li>данные аккаунта — до удаления аккаунта пользователя;</li>
+          <li>при удалении аккаунта данные обезличиваются: имя заменяется на «Удалённый пользователь», история заказов и отзывы сохраняются в обезличенном виде для целей площадки (п. 5 ч. 1 ст. 6 152-ФЗ, договорные отношения с контрагентами);</li>
+          <li>согласие на обработку — до его отзыва;</li>
+          <li>технические cookie и логи — в сроки, необходимые для работы и безопасности сервиса (как правило, не более 30 дней для логов, до истечения cookie);</li>
+          <li>по истечении целей обработки данные уничтожаются или обезличиваются, если иное не предусмотрено законом.</li>
+        </ul>
+
+        <h2>8. Cookie и аналогичные технологии</h2>
+        <p>Сайт использует cookie и localStorage:</p>
+        <ul>
+          <li><code>meblio_session</code> — идентификатор сессии (HttpOnly, Secure, SameSite=Lax), срок до 7 дней; необходим для входа и работы кабинета;</li>
+          <li><code>meblio_device</code> — отметка доверенного устройства для двухфакторной аутентификации, срок до 30 дней;</li>
+          <li><code>meblio-theme</code> в localStorage — выбранная тема оформления;</li>
+          <li><code>meblio-cookie-ok</code> в localStorage — факт закрытия информационного баннера о cookie.</li>
+        </ul>
+        <p>Технические cookie необходимы для работы сервиса. Необходимые cookie не отключаются пользователем через баннер; отказ от необязательных аналитических cookie возможен, если аналитика подключена, через настройки браузера или соответствующие средства.</p>
+
+        <h2>9. Права пользователя персональных данных</h2>
+        <p>Пользователь вправе (ст. 14, 21 152-ФЗ):</p>
+        <ul>
+          <li>получать информацию об обработке своих персональных данных;</li>
+          <li>требовать уточнения, блокирования, уничтожения неточных или незаконно обрабатываемых данных;</li>
+          <li>отозвать согласие на обработку персональных данных;</li>
+          <li>требовать уведомления лиц, которым ранее были переданы неточные данные, об их уничтожении или исправлении;</li>
+          <li>обжаловать действия оператора в Роскомнадзор или в суд.</li>
+        </ul>
+        <p>Запрос направляется на email оператора, указанный в разделе 2, с темой «Персональные данные». Срок ответа — не более 30 дней со дня получения запроса. Для отзыва согласия используйте удаление аккаунта в личном кабинете или напишите на тот же email.</p>
+
+        <h2>10. Меры по обеспечению безопасности</h2>
+        <p>Оператор принимает правовые, организационные и технические меры для защиты персональных данных от неправомерного доступа, уничтожения, изменения, копирования и распространения, в том числе: разграничение прав доступа, хранение паролей в виде соли и криптографического хеша, cookie HttpOnly/Secure/SameSite, проверки CSRF, ограничение частоты запросов (rate limiting), журналирование событий безопасности, резервное копирование, своевременное обновление программного обеспечения.</p>
+
+        <h2>11. Обработка данных несовершеннолетних</h2>
+        <p>Площадка предназначена для пользователей, достигших 14 лет. Согласие на обработку данных детей в возрасте от 14 до 18 лет даётся законным представителем в случаях, предусмотренных законодательством. Если вы считаете, что данные ребенка были переданы без необходимого согласия, сообщите оператору для их удаления.</p>
+
+        <h2>12. Изменения Политики</h2>
+        <p>Оператор вправе изменять Политику. Актуальная редакция всегда доступна на этой странице. При существенных изменениях уведомление размещается на Сайте и/или направляется по email.</p>
+        <p>Дата последней редакции: <strong>23 сентября 2026 года</strong>.</p>
+
+        <h2>13. Контакты</h2>
+        <p>Вопросы по обработке персональных данных: <strong>[email оператора]</strong>. Актуальные реквизиты — в разделе 2 настоящей Политики.</p>
+      </div>
+    </div></section>`;
+}
+
+function offerView() {
+  return `
+    <section class="section"><div class="container legal-page">
+      <p class="breadcrumbs"><a href="/" data-nav>Главная</a> / Публичная оферта</p>
+      <p class="eyebrow">Правовая информация</p>
+      <h1>Публичная оферта</h1>
+      <p class="muted legal-updated">Договор оказания услуг по предоставлению доступа к информационной площадке Meblio · редакция от 23 сентября 2026 года</p>
+      <div class="panel legal-body">
+        <h2>1. Общие положения</h2>
+        <p>1.1. Настоящий документ является публичной офертой (ст. 437 ГК РФ) <strong>[ООО «Меблио» / ИП — подставить реквизиты]</strong> (далее — «Исполнитель») и содержит все существенные условия договора оказания услуг по предоставлению доступа к информационной площадке Meblio.</p>
+        <p>1.2. Сайт: mebl.io (далее — «Площадка») — информационная система для размещения заказов на изготовление мебели, поиска производителей и общения сторон.</p>
+        <p>1.3. Услуги Исполнителя: предоставление технической возможности использовать функции Площадки (регистрация, кабинеты, размещение заказов, отклики, каталоги, чат, уведомления). Исполнитель <strong>не является стороной</strong> договора подряда (купли-продажи) между Заказчиком и Производителем и не гарантирует заключение, качество или исход сделки между ними.</p>
+        <p>1.4. Пользователями могут быть физические и юридические лица, действующие в рамках своей предпринимательской деятельности (B2B), а также физические лица — заказчики мебели для личных нужд.</p>
+
+        <h2>2. Акцепт оферты</h2>
+        <p>2.1. Акцептом настоящей оферты является регистрация аккаунта на Площадке и/или фактическое использование функций Площадки после ознакомления с офертой.</p>
+        <p>2.2. Акцепт означает полное и безоговорочное принятие всех условий настоящей Оферты и <a href="/privacy" data-nav>Политики конфиденциальности</a>.</p>
+        <p>2.3. Исполнитель вправе изменять условия Оферты. Новая редакция вступает в силу с момента её размещения на Площадке и не применяется к отношениям, возникшим до даты размещения.</p>
+
+        <h2>3. Предмет договора и функции Площадки</h2>
+        <p>3.1. Исполнитель предоставляет Пользователю возмездно или на условиях, указанных на Сайте (тарифы, при наличии, публикуются отдельно), техническую возможность:</p>
+        <ul>
+          <li>проходить регистрацию и вести аккаунт (роль «Заказчик» или «Производитель»);</li>
+          <li>размещать и просматривать заказы, отправлять отклики;</li>
+          <li>вести переписку в чате, обмениваться файлами;</li>
+          <li>размещать сведения о компании, услугах, галерее;</li>
+          <li>пользоваться дополнительными функциями (уведомления, AI-ассистент, экспорт, счета) при их наличии.</li>
+        </ul>
+        <p>3.2. Отдельные функции могут временно быть недоступны в связи с обслуживанием, обновлениями или форс-мажором. Исполнитель стремится ограничивать недоступность разумным сроком.</p>
+
+        <h2>4. Регистрация и аккаунт</h2>
+        <p>4.1. Для регистрации пользователь указывает достоверные данные (email, имя или наименование, город, роль и иные запрашиваемые поля) и принимает Оферту и Политику.</p>
+        <p>4.2. Один email — один аккаунт. Пользователь обязан обеспечить конфиденциальность пароля и незамедлительно уведомлять Исполнителя о компрометации аккаунта.</p>
+        <p>4.3. Запрещается: указывать заведомо ложные сведения; использовать аккаунт для противоправных целей; распространять вредоносное ПО; совершать обман других пользователей; осуществлять нежелательную рекламу; обходить технические средства защиты и ограничения Площадки; иным образом нарушать законодательство РФ и права третьих лиц.</p>
+        <p>4.4. Исполнитель вправе ограничить или заблокировать аккаунт при нарушении условий Оферты, требований закона или для обеспечения безопасности, с уведомлением пользователя, если это не противоречит закону.</p>
+
+        <h2>5. Заказчики и Производители: отношения между собой</h2>
+        <p>5.1. Размещение заказа, отклик, переписка и согласование условий на Площадке являются способом <strong>поиска контрагента</strong>. Договор подряда, поставки или оказания услуг на изготовление мебели заключается <strong>напрямую</strong> между Заказчиком и Производителем на согласованных ими условиях (предмет, цена, сроки, гарантия).</p>
+        <p>5.2. Исполнитель не проверяет коммерческие условия сторон, не является гарантом оплаты, качества работ, сроков доставки и монтажа и не участвует в расчётах между Заказчиком и Производителем, если иное не предусмотрено отдельным функционалом Площадки.</p>
+        <p>5.3. Стороны обязаны добросовестно вести переговоры, не совершать действий, вводящих контрагента в заблуждение, и соблюдать применимое законодательство (в т.ч. о рекламе, о защите прав потребителей — для соответствующих субъектов).</p>
+
+        <h2>6. Права и обязанности сторон</h2>
+        <p>6.1. Исполнитель обязуется: предоставлять доступ к функциям Площадки в соответствии с тарифом/условиями; обеспечивать работу сервиса с разумной надёжностью; обрабатывать персональные данные в соответствии с Политикой; отвечать на обращения в разумный срок.</p>
+        <p>6.2. Пользователь обязуется: соблюдать Оферту и Политику; не нарушать права третьих лиц и закон; указывать достоверные данные; самостоятельно разрешать споры с контрагентами.</p>
+        <p>6.3. Пользователь подтверждает, что обладает необходимыми правами на размещаемый контент (тексты, изображения, чертежи) либо имеет согласие правообладателя.</p>
+
+        <h2>7. Ответственность и ограничение ответственности</h2>
+        <p>7.1. Исполнитель отвечает за надлежащее предоставление услуг по настоящей Оферте в пределах, установленных законом.</p>
+        <p>7.2. Исполнитель не несёт ответственности за: действия или бездействие Заказчиков и Производителей между собой; содержание размещённых пользователями объявлений; косвенные убытки, упущенную выгоду — в максимально допустимой законом мере; временную недоступность по причинам форс-мажора, действий третьих лиц или плановых работ.</p>
+        <p>7.3. Совокупная ответственность Исполнителя по Оферте ограничена суммой вознаграждения, фактически полученного от Пользователя за период, в котором возникло нарушение, если иное не предусмотрено императивными нормами закона.</p>
+        <p>7.4. Пользователь использует Площадку на свой риск в части выбора контрагента и условий сделки между сторонами.</p>
+
+        <h2>8. Интеллектуальная собственность</h2>
+        <p>8.1. Права на программный код, дизайн и товарные знаки Площадки принадлежат Исполнителю или его лицензиарам. Использование — только в рамках Оферты.</p>
+        <p>8.2. Пользователь сохраняет права на свои материалы и предоставляет Исполнителю ограниченную лицензию на их размещение и техническую обработку в целях работы Площадки.</p>
+
+        <h2>9. Персональные данные</h2>
+        <p>Обработка персональных данных осуществляется в соответствии с <a href="/privacy" data-nav>Политикой конфиденциальности</a>, являющейся неотъемлемой частью отношений по Оферте.</p>
+
+        <h2>10. Реквизиты Исполнителя</h2>
+        <ul>
+          <li>Наименование: <strong>[ООО «Меблио» / ИП — подставить]</strong></li>
+          <li>ИНН: <strong>[указать]</strong></li>
+          <li>ОГРН/ОГРНИП: <strong>[указать]</strong></li>
+          <li>Адрес: <strong>[указать]</strong></li>
+          <li>Email: <strong>[указать]</strong></li>
+          <li>Сайт: mebl.io</li>
+        </ul>
+        <p>Реквизиты необходимо заполнить до публикации Оферты в боевой среде.</p>
+
+        <h2>11. Применимое право и порядок разрешения споров</h2>
+        <p>11.1. К отношениям применяется право Российской Федерации.</p>
+        <p>11.2. Споры решаются в порядке претензии (письмо на email Исполнителя, срок ответа — 30 календарных дней) и, при недостижении согласия, в суде по месту нахождения Исполнителя или в ином порядке, предусмотренном законом.</p>
+        <p>11.3. Если отдельные положения Оферты будут признаны недействительными, остальные положения сохраняют силу.</p>
+
+        <h2>12. Порядок обращений</h2>
+        <p>Вопросы по Оферте и функционированию Площадки: <strong>[email оператора]</strong>. Вопросы по персональным данным — см. Политику конфиденциальности.</p>
+      </div>
+    </div></section>`;
+}
+
+function tariffsView() {
+  const plan = state.user?.plan || "free";
+  const isPro = plan !== "free";
+  return `
+    <section class="section"><div class="container">
+      <p class="breadcrumbs"><a href="/" data-nav>Главная</a> / Тарифы</p>
+      <p class="eyebrow">Тарифы</p>
+      <h1>Free и Pro</h1>
+      <p class="lead">Оплата по тарифу — статусы счетов на площадке. Гарантия на работу — 14 дней после приёмки.</p>
+      ${state.user ? `<p class="muted">Ваш текущий тариф: <strong class="badge ${isPro ? "badge-paid" : "badge-pending"}">${isPro ? "Pro" : "Free"}</strong></p>` : `<p class="muted">Войдите, чтобы переключить тариф.</p>`}
+      <div class="tariff-grid">
+        <article class="tariff-card ${!isPro ? "is-current" : ""}">
+          <h2>Free</h2>
+          <p class="tariff-price">0 ₽<span>/мес</span></p>
+          <ul class="tariff-features">
+            <li>5 откликов в месяц</li>
+            <li>Заказы, чаты, счета</li>
+            <li>Гарантия 14 дней</li>
+            <li>Калькулятор сметы</li>
+          </ul>
+          ${state.user && isPro ? `<button class="button button-secondary" type="button" data-upgrade-plan="free">Перейти на Free</button>` : `<button class="button button-secondary" type="button" disabled>Текущий базовый</button>`}
+        </article>
+        <article class="tariff-card is-pro ${isPro ? "is-current" : ""}">
+          <h2>Pro</h2>
+          <p class="tariff-price">4 990 ₽<span>/мес</span></p>
+          <ul class="tariff-features">
+            <li>Безлимитные отклики</li>
+            <li>Приоритет в каталоге</li>
+            <li>КП и 비교ение откликов</li>
+            <li>Гарантия 14 дней</li>
+          </ul>
+          ${state.user && !isPro ? `<button class="button button-primary" type="button" data-upgrade-plan="pro">Перейти на Pro</button>` : state.user ? `<button class="button button-secondary" type="button" disabled>Активен</button>` : `<button class="button button-primary" type="button" data-auth="login">Войти</button>`}
+        </article>
+      </div>
+      <div class="panel" style="margin-top:24px">
+        <h3>Что входит в сделку</h3>
+        <p class="muted">Договор-HTML, счета со статусами, этапы и акт приёмки, верификация реквизитов, калькулятор сметы.</p>
+        <a class="button button-secondary button-small" href="/offer" data-nav>Условия оферты</a>
+      </div>
+    </div></section>`;
+}
+
 function overview() {
   const myOrdersCount = state.orders.filter((o) => o.client_id === state.user.id).length;
   const myResponsesCount = state.orders.flatMap((o) => o.responses || []).filter((r) => r.maker_id === state.user.id).length;
@@ -1184,7 +1537,9 @@ function overview() {
           ? '<button class="button button-primary" type="button" data-tab="new-order">Создать заказ</button><button class="button button-secondary" type="button" data-tab="my-orders">Мои заказы</button>'
           : '<button class="button button-primary" type="button" data-tab="available">Найти заказ</button><button class="button button-secondary" type="button" data-tab="responses">Мои отклики</button>'}
         <button class="button button-secondary" type="button" data-tab="chats">Сообщения</button>
+        <a class="button button-secondary" href="/tariffs" data-nav>Тарифы</a>
       </div>
+      ${state.user.role === "maker" ? `<p class="muted" style="margin-top:12px">Тариф: <strong>${escapeHtml(state.user.plan || "free")}</strong> · <a href="/tariffs" data-nav>изменить</a></p>` : ""}
     </div>`;
 }
 
@@ -1225,8 +1580,15 @@ function myOrders() {
 
 function responsesBlock(order) {
   if (!order.responses?.length) return "";
+  const selected = state.compareResponses.filter((x) => x.orderId === order.id).map((x) => x.makerId);
   return `<div class="panel response-list" id="responses-${order.id}">
-    <h3>Отклики на "${escapeHtml(order.title)}"</h3>
+    <div class="admin-toolbar">
+      <h3 style="margin:0">Отклики на "${escapeHtml(order.title)}"</h3>
+      <div class="actions" style="margin:0">
+        ${selected.length >= 2 ? `<button class="button button-primary button-small" type="button" data-compare-open="${order.id}">Сравнить (${selected.length})</button>` : ""}
+        ${selected.length ? `<button class="button button-secondary button-small" type="button" data-compare-clear="${order.id}">Сбросить</button>` : ""}
+      </div>
+    </div>
     <p class="muted" style="margin:0 0 8px">Сортировка:
       <button class="hint link-button" type="button" data-sort-responses="${order.id}:price">по цене</button> ·
       <button class="hint link-button" type="button" data-sort-responses="${order.id}:days">по срокам</button>
@@ -1235,7 +1597,10 @@ function responsesBlock(order) {
       <article class="maker-card">
         <div class="maker-card-header">
           <div><h3>${escapeHtml(r.maker_name)}</h3><p>${escapeHtml(r.maker_city)} · ${r.days} дней · ${money(r.price)}</p></div>
-          ${order.selected_maker_id === r.maker_id ? '<span class="status status-progress">Выбран</span>' : ""}
+          <div class="actions" style="margin:0">
+            ${order.status === "open" ? `<label class="compare-check"><input type="checkbox" data-compare-toggle="${order.id}:${r.maker_id}" ${selected.includes(r.maker_id) ? "checked" : ""}> Сравнить</label>` : ""}
+            ${order.selected_maker_id === r.maker_id ? '<span class="status status-progress">Выбран</span>' : ""}
+          </div>
         </div>
         <p>${escapeHtml(r.message)}</p>
         <div class="actions">
@@ -1246,6 +1611,48 @@ function responsesBlock(order) {
   </div>`;
 }
 
+function compareResponsesView(orderId) {
+  const order = state.orders.find((o) => o.id === Number(orderId));
+  const ids = state.compareResponses.filter((x) => x.orderId === Number(orderId)).map((x) => x.makerId);
+  const rows = (order?.responses || []).filter((r) => ids.includes(r.maker_id));
+  if (rows.length < 2) return emptyState("Выберите минимум два отклика для сравнения.");
+  const metrics = [
+    ["Компания", (r) => escapeHtml(r.maker_name)],
+    ["Город", (r) => escapeHtml(r.maker_city || "—")],
+    ["Цена", (r) => `<strong>${money(r.price)}</strong>`],
+    ["Срок", (r) => `${r.days} дн.`],
+    ["Цена/день", (r) => money(Math.round(r.price / Math.max(1, r.days)))],
+    ["Сообщение", (r) => escapeHtml(r.message || "—")],
+  ];
+  return `
+    <div class="panel">
+      <div class="admin-toolbar">
+        <h3 style="margin:0">Сравнение откликов</h3>
+        <button class="button button-secondary button-small" type="button" data-close-compare>Закрыть</button>
+      </div>
+      <div class="compare-table-wrap">
+        <table class="admin-table compare-table">
+          <thead><tr><th>Параметр</th>${rows.map((r) => `<th>${escapeHtml(r.maker_name)}</th>`).join("")}</tr></thead>
+          <tbody>
+            ${metrics.map(([label, fmt]) => `
+              <tr><td class="compare-label">${label}</td>${rows.map((r) => `<td>${fmt(r)}</td>`).join("")}</tr>
+            `).join("")}
+            <tr>
+              <td class="compare-label">Действие</td>
+              ${rows.map((r) => `
+                <td>
+                  <div class="actions">
+                    <button class="button button-secondary button-small" type="button" data-open-chat="${order.id}">Чат</button>
+                    ${order.status === "open" ? `<button class="button button-primary button-small" type="button" data-choose-maker="${order.id}:${r.maker_id}">Выбрать</button>` : ""}
+                  </div>
+                </td>`).join("")}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
 function availableOrders() {
   const orders = state.orders.filter((o) => o.status === "open" && !o.responses?.some((r) => r.maker_id === state.user.id));
   return `<div class="order-list">${orders.length ? orders.map((o) => orderCard(o)).join("") : emptyState("Новых заказов для отклика пока нет.")}</div>`;
@@ -1254,6 +1661,41 @@ function availableOrders() {
 function myResponses() {
   const orders = state.orders.filter((o) => o.responses?.some((r) => r.maker_id === state.user.id));
   return `<div class="order-list">${orders.length ? orders.map((o) => orderCard(o)).join("") : emptyState("Вы пока не оставляли отклики.")}</div>`;
+}
+
+async function loadMakerFunnel() {
+  const data = await api("/api/maker/funnel");
+  state.makerFunnel = data;
+}
+
+function makerFunnelView() {
+  const f = state.makerFunnel;
+  if (!f) return emptyState("Загрузка воронки…");
+  const stageCards = f.stages.map((s, i) => `
+    <div class="funnel-stage">
+      <div class="funnel-stage-head">
+        <span class="funnel-step">${i + 1}</span>
+        <strong>${escapeHtml(s.label)}</strong>
+        <span class="funnel-count">${s.orders.length}</span>
+      </div>
+      ${s.orders.length ? `
+        <ul class="funnel-list">
+          ${s.orders.map((o) => `
+            <li>
+              <span class="funnel-title">${escapeHtml(o.title)}</span>
+              <span class="muted">${money(o.budget)} · ${escapeHtml(o.city || "—")}</span>
+            </li>`).join("")}
+        </ul>` : '<p class="muted funnel-empty">Пусто</p>'}
+    </div>`).join("");
+  return `
+    <div class="panel">
+      <h2 style="margin:0 0 8px">Воронка продаж</h2>
+      <p class="muted" style="margin:0 0 16px">От доступных заказов до завершённых сделок.</p>
+      <div class="funnel-grid">${stageCards}</div>
+      <div class="actions" style="margin-top:16px">
+        <button class="button button-secondary button-small" type="button" data-action="refresh-funnel">Обновить</button>
+      </div>
+    </div>`;
 }
 
 function myFavorites() {
@@ -1298,6 +1740,13 @@ function myServices() {
 
 function serviceFormModal(service = null) {
   const isEdit = !!service;
+  const params = (service && Array.isArray(service.params)) ? service.params : [];
+  const paramRows = (params.length ? params : [{ name: "", value: "" }]).map((p) => `
+    <div class="service-param-row">
+      <input name="param_name" placeholder="Например: Материал" value="${escapeHtml(p.name || "")}" maxlength="80">
+      <input name="param_value" placeholder="Значение" value="${escapeHtml(p.value || "")}" maxlength="200">
+      <button class="button button-secondary button-small" type="button" data-action="remove-service-param" title="Удалить">✕</button>
+    </div>`).join("");
   document.getElementById("serviceFormSlot").innerHTML = `
     <div class="modal is-open" id="serviceModal">
       <div class="modal-backdrop" data-close-service></div>
@@ -1309,10 +1758,86 @@ function serviceFormModal(service = null) {
           <label>Название <input name="title" value="${isEdit ? escapeHtml(service.title) : ""}" required></label>
           <label>Описание <textarea name="description" rows="3">${isEdit ? escapeHtml(service.description) : ""}</textarea></label>
           <label>Тип цены <input name="price_type" value="${isEdit ? escapeHtml(service.price_type || "") : ""}" placeholder="по проекту, от ... руб."></label>
+          <div class="service-params-editor">
+            <span class="muted">Параметры услуги</span>
+            <div id="serviceParamRows">${paramRows}</div>
+            <button class="button button-secondary button-small" type="button" data-action="add-service-param">+ Параметр</button>
+          </div>
           <button class="button button-primary" type="submit">${isEdit ? "Сохранить" : "Добавить"}</button>
+          ${isEdit && service.id ? `<button class="button button-secondary" type="button" data-edit-service="${service.id}" hidden>Сохранить</button>` : ""}
         </form>
       </section>
     </div>`;
+}
+
+function openProposalFormModal(orderId) {
+  document.getElementById("serviceFormSlot")?.remove();
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modal is-open" id="proposalModal">
+      <div class="modal-backdrop" data-close-proposal></div>
+      <section class="modal-card">
+        <button class="modal-close" type="button" data-close-proposal>x</button>
+        <p class="eyebrow">Коммерческое предложение</p>
+        <h2>Новое КП</h2>
+        <form class="stack-form" id="proposalForm" data-order-id="${orderId}">
+          <label>Сумма, ₽ <input name="amount" type="number" min="1" required placeholder="150000"></label>
+          <label>Срок, дней <input name="days" type="number" min="0" value="14"></label>
+          <label>Комментарий <textarea name="message" rows="3" placeholder="Что входит, условия оплаты…"></textarea></label>
+          <div class="proposal-items-editor">
+            <span class="muted">Позиции (необязательно)</span>
+            <div id="proposalItemRows">
+              <div class="proposal-item-row">
+                <input name="item_name" placeholder="Наименование">
+                <input name="item_qty" type="number" min="1" value="1" placeholder="Кол-во">
+                <input name="item_price" type="number" min="0" placeholder="Цена">
+              </div>
+            </div>
+            <button class="button button-secondary button-small" type="button" data-action="add-proposal-item">+ Позиция</button>
+          </div>
+          <button class="button button-primary" type="submit">Отправить КП</button>
+        </form>
+      </section>
+    </div>`);
+}
+
+async function openProposalsModal(orderId) {
+  const data = await api(`/api/orders/${orderId}/proposals`);
+  const proposals = data.proposals || [];
+  document.getElementById("proposalListModal")?.remove();
+  const canAct = state.user?.id && proposals.length && state.user.role === "client";
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modal is-open" id="proposalListModal">
+      <div class="modal-backdrop" data-close-proposal-list></div>
+      <section class="modal-card">
+        <button class="modal-close" type="button" data-close-proposal-list>x</button>
+        <p class="eyebrow">Коммерческие предложения</p>
+        <h2>КП по заказу #${orderId}</h2>
+        ${proposals.length ? proposals.map((p) => {
+          const items = Array.isArray(p.items) ? p.items : [];
+          const isClient = state.user?.id && state.user.role === "client";
+          return `
+            <article class="proposal-card">
+              <div class="proposal-card-head">
+                <strong>${escapeHtml(p.maker_name || "")}</strong>
+                <span class="badge badge-${p.status === "accepted" ? "paid" : p.status === "rejected" ? "cancelled" : "pending"}">${p.status === "accepted" ? "Принято" : p.status === "rejected" ? "Отклонено" : "Отправлено"}</span>
+              </div>
+              <p><strong>${money(p.amount)}</strong>${p.days ? ` · ${p.days} дн.` : ""}</p>
+              ${p.message ? `<p class="muted">${escapeHtml(p.message)}</p>` : ""}
+              ${items.length ? `<ul class="proposal-items">${items.map((it) => `<li>${escapeHtml(it.name)} × ${it.qty} · ${money(it.price * it.qty)}</li>`).join("")}</ul>` : ""}
+              <small class="muted">${escapeHtml(p.created_at)}</small>
+              ${isClient && p.status === "sent" ? `
+                <div class="actions" style="margin-top:8px">
+                  <button class="button button-primary button-small" type="button" data-proposal-status="${p.id}:accepted" data-proposal-order="${orderId}">Принять</button>
+                  <button class="button button-secondary button-small" type="button" data-proposal-status="${p.id}:rejected" data-proposal-order="${orderId}">Отклонить</button>
+                </div>` : ""}
+              ${state.user?.id === p.maker_id && p.status === "rejected" ? `
+                <div class="actions" style="margin-top:8px">
+                  <button class="button button-secondary button-small" type="button" data-proposal-status="${p.id}:sent" data-proposal-order="${orderId}">Отправить снова</button>
+                </div>` : ""}
+            </article>`;
+        }).join("") : `<p class="muted">КП пока нет.</p>`}
+      </section>
+    </div>`);
 }
 
 function profileForm() {
@@ -1330,6 +1855,7 @@ function profileForm() {
       <label>Телефон <input name="phone" value="${escapeHtml(user.phone || "")}" placeholder="+7"></label>
       <label>ИНН <input name="inn" value="${escapeHtml(user.inn || "")}" maxlength="12" placeholder="10 или 12 цифр"></label>
       <label>ОГРН <input name="ogrn" value="${escapeHtml(user.ogrn || "")}" maxlength="15" placeholder="13 или 15 цифр"></label>
+      ${user.verified_requisites_at ? `<p class="full"><span class="badge badge-paid">✓ Реквизиты проверены ${escapeHtml(String(user.verified_requisites_at).slice(0, 10))}</span></p>` : ""}
       <label>Веб-сайт <input name="website" value="${escapeHtml(user.website || "")}" placeholder="https://example.ru"></label>
       <label class="full check-label">
         <input type="checkbox" name="is_public" ${user.is_public === 0 ? "" : "checked"}>
@@ -1491,6 +2017,17 @@ function notifPrefsView() {
             <small>Отправка на email (в разработке)</small>
           </label>
         </div>
+        <div class="notif-pref-group">
+          <h3>Мессенджеры</h3>
+          <label>Telegram chat_id
+            <input name="telegram_chat_id" value="${escapeHtml(state.user?.telegram_chat_id || "")}" placeholder="123456789" maxlength="64">
+            <small class="muted">Нужен TELEGRAM_BOT_TOKEN на сервере. Узнайте chat_id у бота @userinfobot.</small>
+          </label>
+          <label>MAX chat_id
+            <input name="max_chat_id" value="${escapeHtml(state.user?.max_chat_id || "")}" placeholder="max-chat-id" maxlength="64">
+            <small class="muted">Нужен MAX_API_TOKEN на сервере.</small>
+          </label>
+        </div>
         <button class="button button-primary" type="submit">Сохранить настройки</button>
       </form>
     </div>`;
@@ -1576,6 +2113,9 @@ async function render() {
     company: "Компания — Meblio",
     dashboard: "Личный кабинет — Meblio",
     notifications: "Уведомления — Meblio",
+    privacy: "Политика конфиденциальности — Meblio",
+    offer: "Публичная оферта — Meblio",
+    tariffs: "Тарифы Free и Pro — Meblio",
   };
   document.title = viewTitles[state.view] || "Meblio";
 
@@ -1604,6 +2144,14 @@ async function render() {
     renderAsync(articlesListView());
   } else if (state.view === "article") {
     renderAsync(articlePageView(state.articleSlug));
+  } else if (state.view === "privacy") {
+    app.innerHTML = privacyView();
+    startDeadlineTimers();
+  } else if (state.view === "offer") {
+    app.innerHTML = offerView();
+    startDeadlineTimers();
+  } else if (state.view === "tariffs") {
+    renderAsync(tariffsView());
   } else if (state.view === "dashboard") {
     await Promise.all([loadOrders(), loadRegions()]);
     if (state.user?.role === "client") {
@@ -1615,6 +2163,7 @@ async function render() {
     if (state.user?.role === "maker") {
       const data = await api(`/api/services?user_id=${state.user.id}`);
       state.services = data.services;
+      if (state.dashboardTab === "funnel" && !state.makerFunnel) await loadMakerFunnel();
     }
     await loadThreads();
     renderDashboard();
@@ -1626,6 +2175,10 @@ async function render() {
       await loadAdminAnalytics();
       renderAdmin();
       setTimeout(renderAnalyticsCharts, 50);
+    }
+    if (state.adminTab === "reports") {
+      await loadAdminReports();
+      renderAdmin();
     }
   }
   startDeadlineTimers();
@@ -1688,6 +2241,12 @@ async function loadAdminServices() {
   state.adminServices = data.services;
 }
 
+async function loadAdminReports() {
+  const data = await api("/api/admin/reports?status=pending&page_size=100");
+  state.adminReports = data.reports;
+  state.adminReportsTotal = data.total;
+}
+
 function isFavorite(companyId) {
   return state.favorites.some((f) => f.company_id === companyId);
 }
@@ -1699,6 +2258,7 @@ function renderAdmin() {
     ["users", "Пользователи"],
     ["orders", "Заказы"],
     ["services", "Услуги"],
+    ["reports", "Жалобы"],
     ["activity", "Журнал"],
   ];
   app.innerHTML = `
@@ -1727,8 +2287,48 @@ function adminContent() {
   if (state.adminTab === "orders") return adminOrders();
   if (state.adminTab === "services") return adminServices();
   if (state.adminTab === "analytics") return adminAnalytics();
+  if (state.adminTab === "reports") return adminReports();
   if (state.adminTab === "activity") return adminActivityLog();
   return adminOverview();
+}
+
+function adminReports() {
+  const reports = state.adminReports || [];
+  const statusLabels = { pending: "Ожидает", resolved: "Обработана", rejected: "Отклонена" };
+  const typeLabels = { order: "Заказ", service: "Услуга", company: "Компания", review: "Отзыв", user: "Пользователь" };
+  if (!reports.length) return emptyState("Жалоб нет.");
+  return `
+    <div class="panel">
+      <div class="admin-toolbar">
+        <h3 style="margin:0">Жалобы</h3>
+        <span class="muted">Всего: ${state.adminReportsTotal ?? reports.length}</span>
+      </div>
+      <div class="admin-table-wrap">
+        <table class="admin-table">
+          <thead><tr><th>#</th><th>Тип</th><th>ID</th><th>Причина</th><th>Отправил</th><th>Статус</th><th>Дата</th><th></th></tr></thead>
+          <tbody>
+            ${reports.map(r => `
+              <tr>
+                <td>${r.id}</td>
+                <td>${typeLabels[r.target_type] || escapeHtml(r.target_type)}</td>
+                <td>${r.target_id}</td>
+                <td>${escapeHtml(r.reason)}</td>
+                <td>${escapeHtml(r.reporter_name || "—")}</td>
+                <td><span class="badge badge-${r.status === "pending" ? "pending" : r.status === "resolved" ? "paid" : "cancelled"}">${statusLabels[r.status] || escapeHtml(r.status)}</span></td>
+                <td>${escapeHtml((r.created_at || "").slice(0, 16))}</td>
+                <td>
+                  ${r.status === "pending" ? `
+                    <div class="actions">
+                      <button class="button button-secondary button-small" type="button" data-report-resolve="${r.id}:rejected">Отклонить</button>
+                      <button class="button button-primary button-small" type="button" data-report-resolve="${r.id}:resolved:hide">Принять + скрыть</button>
+                    </div>` : "—"}
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 function adminOverview() {
@@ -2097,6 +2697,76 @@ function exportAnalyticsCSV() {
   showToast("CSV экспортирован", "success");
 }
 
+// === Estimate calculator ===
+function estimateView() {
+  const mats = state.materials || [];
+  return `
+    <div class="panel">
+      <h2 style="margin:0 0 8px">Калькулятор сметы</h2>
+      <p class="muted" style="margin-bottom:16px">Ориентировочная стоимость корпусной мебели: материал, раскрой, сборка и фурнитура. Итог уточняется с исполнителем.</p>
+      <form class="stack-form grid-form" id="estimateForm">
+        <label>Ширина, мм <input name="width" type="number" min="100" max="10000" value="600" required></label>
+        <label>Высота, мм <input name="height" type="number" min="100" max="10000" value="2000" required></label>
+        <label>Глубина, мм <input name="depth" type="number" min="100" max="10000" value="400" required></label>
+        <label>Количество, шт <input name="qty" type="number" min="1" max="500" value="1" required></label>
+        <label>Материал
+          <select name="material_id">
+            <option value="">Свой материал</option>
+            ${mats.map(m => `<option value="${m.id}">${escapeHtml(m.name)} — ${money(m.price_per_m2)}/м²</option>`).join("")}
+          </select>
+        </label>
+        <label>Цена материала, руб/м² <input name="material_price" type="number" min="0" value="1200" ${mats.length ? "" : ""}></label>
+        <label>Сложность
+          <select name="complexity">
+            <option value="simple">Простая</option>
+            <option value="medium" selected>Средняя</option>
+            <option value="complex">Сложная</option>
+          </select>
+        </label>
+        <label>Фурнитура
+          <select name="hardware">
+            <option value="basic">Базовая</option>
+            <option value="standard" selected>Стандарт</option>
+            <option value="premium">Премиум</option>
+          </select>
+        </label>
+        <button class="button button-primary full" type="submit">Рассчитать</button>
+      </form>
+      <div id="estimateResult" class="estimate-result" hidden></div>
+    </div>`;
+}
+
+async function runEstimate(form) {
+  const data = Object.fromEntries(new FormData(form));
+  const body = {
+    width: Number(data.width),
+    height: Number(data.height),
+    depth: Number(data.depth),
+    qty: Number(data.qty),
+    complexity: data.complexity,
+    hardware: data.hardware,
+    material_price: Number(data.material_price) || 0,
+    material_name: data.material_id ? "" : "Свой материал",
+  };
+  if (data.material_id) body.material_id = Number(data.material_id);
+  const result = await api("/api/estimate", { method: "POST", body: JSON.stringify(body) });
+  const box = document.getElementById("estimateResult");
+  if (!box) return;
+  box.hidden = false;
+  box.innerHTML = `
+    <h3>Предварительная смета</h3>
+    <dl class="requisites">
+      <div><dt>Площадь</dt><dd>${result.area_m2} м²</dd></div>
+      <div><dt>Материал</dt><dd>${escapeHtml(result.material_name)} — ${money(result.material_price)}/м²</dd></div>
+      <div><dt>Материалы</dt><dd>${money(result.material_cost)}</dd></div>
+      <div><dt>Раскрой и сборка</dt><dd>${money(result.assembly_cost)}</dd></div>
+      <div><dt>Фурнитура</dt><dd>${money(result.hardware_cost)}</dd></div>
+      <div><dt>За единицу</dt><dd><strong>${money(result.unit_cost)}</strong></dd></div>
+      <div><dt>Итого (${result.qty} шт.)</dt><dd><strong>${money(result.total)}</strong></dd></div>
+      <div><dt>Гарантия</dt><dd>${result.warranty_days} дней после приёмки</dd></div>
+    </dl>`;
+}
+
 // === Materials Catalog ===
 function materialsView() {
   const cats = { ldsp: "ЛДСП", mdf: "МДФ", other: "Другое" };
@@ -2226,6 +2896,15 @@ function invoiceDetailView(inv) {
         <div class="invoice-footer">
           <p>Статус: <span class="badge badge-${inv.status}">${{pending:"Ожидает оплаты",paid:"Оплачен",cancelled:"Отменён"}[inv.status] || inv.status}</span></p>
           ${inv.due_date ? `<p>Срок оплаты: ${escapeHtml(inv.due_date)}</p>` : ''}
+          ${state.user && (state.user.id === inv.from_user_id || state.user.id === inv.to_user_id || state.user.role === "admin") && inv.status === "pending" ? `
+            <div class="actions" style="margin-top:12px">
+              <button class="button button-primary button-small" type="button" data-invoice-status="${inv.id}:paid">Отметить оплаченным</button>
+              <button class="button button-secondary button-small" type="button" data-invoice-status="${inv.id}:cancelled">Отменить счёт</button>
+            </div>` : ""}
+          ${state.user && (state.user.id === inv.from_user_id || state.user.id === inv.to_user_id || state.user.role === "admin") && inv.status === "paid" ? `
+            <div class="actions" style="margin-top:12px">
+              <button class="button button-secondary button-small" type="button" data-invoice-status="${inv.id}:cancelled">Отменить счёт</button>
+            </div>` : ""}
         </div>
       </div>
     </div>`;
@@ -2875,7 +3554,7 @@ async function adminViewOrder(orderId) {
 }
 
 document.addEventListener("click", async (event) => {
-  const target = event.target.closest("button, [data-close-modal], [data-close-response], [data-close-service], [data-company-id]");
+  const target = event.target.closest("button, [data-nav], [data-close-modal], [data-close-response], [data-close-service], [data-company-id]");
   if (!target) return;
   try {
     if (target.dataset.view) return setView(target.dataset.view);
@@ -2890,6 +3569,33 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.closeModal !== undefined) return closeAuth();
     if (target.dataset.closeResponse !== undefined) return document.querySelector("#responseModal")?.remove();
     if (target.dataset.closeService !== undefined) return document.querySelector("#serviceModal")?.remove();
+    if (target.dataset.closeProposal !== undefined) return document.querySelector("#proposalModal")?.remove();
+    if (target.dataset.closeProposalList !== undefined) return document.querySelector("#proposalListModal")?.remove();
+    if (target.dataset.action === "add-proposal-item") {
+      const rows = document.getElementById("proposalItemRows");
+      if (rows) {
+        rows.insertAdjacentHTML("beforeend", `
+          <div class="proposal-item-row">
+            <input name="item_name" placeholder="Наименование">
+            <input name="item_qty" type="number" min="1" value="1" placeholder="Кол-во">
+            <input name="item_price" type="number" min="0" placeholder="Цена">
+          </div>`);
+      }
+      return;
+    }
+    if (target.dataset.verifyRequisites) {
+      const [userId, flag] = target.dataset.verifyRequisites.split(":");
+      await api("/api/admin/verify-requisites", {
+        method: "POST",
+        body: JSON.stringify({ user_id: Number(userId), verified: flag === "1" }),
+      });
+      showToast(flag === "1" ? "Реквизиты подтверждены" : "Отметка снята", "success");
+      if (state.activeCompanyId) {
+        const data = await api(`/api/companies/${state.activeCompanyId}`);
+        return renderCompanyProfile(data.company);
+      }
+      return render();
+    }
     if (target.dataset.action === "logout") {
       if (ws) { ws.close(); ws = null; }
       if (wsHeartbeatTimer) { clearInterval(wsHeartbeatTimer); wsHeartbeatTimer = null; }
@@ -3086,7 +3792,60 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.action === "add-service") { serviceFormModal(); return; }
     if (target.dataset.editService) {
       const s = state.services.find((sv) => sv.id === Number(target.dataset.editService));
-      if (s) serviceFormModal(s);
+      if (s) {
+        try {
+          const detail = await api(`/api/services/${s.id}`);
+          serviceFormModal({ ...s, params: detail.service.params || [] });
+        } catch {
+          serviceFormModal(s);
+        }
+      }
+      return;
+    }
+    if (target.dataset.action === "add-service-param") {
+      const rows = document.getElementById("serviceParamRows");
+      if (rows) {
+        rows.insertAdjacentHTML("beforeend", `
+          <div class="service-param-row">
+            <input name="param_name" placeholder="Например: Материал" maxlength="80">
+            <input name="param_value" placeholder="Значение" maxlength="200">
+            <button class="button button-secondary button-small" type="button" data-action="remove-service-param" title="Удалить">✕</button>
+          </div>`);
+      }
+      return;
+    }
+    if (target.dataset.action === "remove-service-param") {
+      target.closest(".service-param-row")?.remove();
+      return;
+    }
+    if (target.dataset.upgradePlan) {
+      if (!state.user) return openAuth("login");
+      const plan = target.dataset.upgradePlan;
+      if (plan === "pro" && !confirm("Активировать тариф Pro? (демо: без платёжного провайдера)")) return;
+      const r = await api("/api/tariff/upgrade", { method: "POST", body: JSON.stringify({ plan }) });
+      if (r.user) state.user = r.user;
+      showToast(`Тариф: ${plan}`, "success");
+      return render();
+    }
+    if (target.dataset.createProposal) {
+      const orderId = Number(target.dataset.createProposal);
+      openProposalFormModal(orderId);
+      return;
+    }
+    if (target.dataset.listProposals) {
+      const orderId = Number(target.dataset.listProposals);
+      await openProposalsModal(orderId);
+      return;
+    }
+    if (target.dataset.proposalStatus) {
+      const [pid, status] = target.dataset.proposalStatus.split(":");
+      if (status === "accepted" && !confirm("Принять КП и выбрать этого исполнителя?")) return;
+      if (status === "rejected" && !confirm("Отклонить КП?")) return;
+      await api(`/api/proposals/${pid}/status`, { method: "POST", body: JSON.stringify({ status }) });
+      showToast(status === "accepted" ? "КП принято" : status === "rejected" ? "КП отклонено" : "КП обновлено", "success");
+      const orderId = Number(target.dataset.proposalOrder || 0);
+      if (orderId) await openProposalsModal(orderId);
+      if (status === "accepted") await refreshData();
       return;
     }
     if (target.dataset.deleteService) {
@@ -3110,6 +3869,42 @@ document.addEventListener("click", async (event) => {
       if (state.dashboardTab === "certificates") await loadCertificates();
       if (state.dashboardTab === "time") await loadTimeEntries();
       if (state.dashboardTab === "security") await loadTfaStatus();
+      if (state.dashboardTab === "funnel") await loadMakerFunnel();
+      return render();
+    }
+    if (target.dataset.duplicateOrder) {
+      if (!confirm("Создать копию заказа как черновик?")) return;
+      const data = await api(`/api/orders/${target.dataset.duplicateOrder}/duplicate`, { method: "POST", body: JSON.stringify({}) });
+      showToast(`Копия создана: «${data.order.title}»`, "success");
+      state.dashboardTab = "my-orders";
+      state.view = "dashboard";
+      await refreshData();
+      return render();
+    }
+    if (target.dataset.compareClear) {
+      const orderId = Number(target.dataset.compareClear);
+      state.compareResponses = state.compareResponses.filter((x) => x.orderId !== orderId);
+      return render();
+    }
+    if (target.dataset.compareOpen) {
+      const orderId = Number(target.dataset.compareOpen);
+      document.getElementById("compareModal")?.remove();
+      app.insertAdjacentHTML("beforeend", `
+        <div class="modal is-open" id="compareModal">
+          <div class="modal-backdrop" data-close-compare></div>
+          <section class="modal-card modal-card-wide">
+            <button class="modal-close" type="button" data-close-compare>x</button>
+            ${compareResponsesView(orderId)}
+          </section>
+        </div>`);
+      return;
+    }
+    if (target.dataset.closeCompare !== undefined) {
+      document.getElementById("compareModal")?.remove();
+      return;
+    }
+    if (target.dataset.action === "refresh-funnel") {
+      await loadMakerFunnel();
       return render();
     }
     if (target.dataset.createOrder !== undefined) {
@@ -3157,14 +3952,110 @@ document.addEventListener("click", async (event) => {
         return render();
       }
     }
-    if (target.dataset.closeOrder) {
-      const orderId = Number(target.dataset.closeOrder);
-      if (confirm("Завершить заказ? После завершения можно оставить отзыв.")) {
-        await api(`/api/orders/${orderId}/close`, { method: "POST", body: JSON.stringify({}) });
-        showToast("Заказ завершён. Теперь можно оставить отзыв.", "success");
+    if (target.dataset.toggleStages) {
+      const panel = document.getElementById(`stages-${target.dataset.toggleStages}`);
+      if (!panel) return;
+      if (!panel.hidden) { panel.hidden = true; return; }
+      await loadOrderStagesInto(target.dataset.toggleStages, panel);
+      panel.hidden = false;
+      return;
+    }
+    if (target.dataset.stageToggle) {
+      const [orderId, stageId, done] = target.dataset.stageToggle.split(":");
+      await api(`/api/orders/${orderId}/stages/${stageId}`, {
+        method: "PUT",
+        body: JSON.stringify({ done: done === "1" ? 0 : 1 }),
+      });
+      const panel = document.getElementById(`stages-${orderId}`);
+      if (panel && !panel.hidden) await loadOrderStagesInto(orderId, panel);
+      showToast("Этап обновлён", "success");
+      return;
+    }
+    if (target.dataset.stageDelete) {
+      const [orderId, stageId] = target.dataset.stageDelete.split(":");
+      if (!confirm("Удалить этап?")) return;
+      await api(`/api/orders/${orderId}/stages/${stageId}`, {
+        method: "PUT",
+        body: JSON.stringify({ delete: true }),
+      });
+      const panel = document.getElementById(`stages-${orderId}`);
+      if (panel) await loadOrderStagesInto(orderId, panel);
+      showToast("Этап удалён", "success");
+      return;
+    }
+    if (target.dataset.addStage) {
+      const orderId = target.dataset.addStage;
+      const name = prompt("Название этапа:");
+      if (!name?.trim()) return;
+      await api(`/api/orders/${orderId}/stages`, { method: "POST", body: JSON.stringify({ name: name.trim() }) });
+      const panel = document.getElementById(`stages-${orderId}`);
+      if (panel) await loadOrderStagesInto(orderId, panel);
+      return;
+    }
+    if (target.dataset.acceptOrder) {
+      const orderId = Number(target.dataset.acceptOrder);
+      if (!confirm("Принять работу и закрыть заказ? После этого можно оставить отзыв.")) return;
+      try {
+        await api(`/api/orders/${orderId}/accept`, { method: "POST", body: JSON.stringify({}) });
+        showToast("Работа принята. Гарантия 14 дней.", "success");
         await refreshData();
         return render();
+      } catch (error) {
+        if (String(error.message).includes("Не завершены этапы") || String(error.message).includes("этап")) {
+          if (confirm(`${error.message}\n\nПринять без завершённых этапов?`)) {
+            await api(`/api/orders/${orderId}/accept`, { method: "POST", body: JSON.stringify({ force: true }) });
+            showToast("Работа принята с подтверждением.", "success");
+            await refreshData();
+            return render();
+          }
+        } else throw error;
       }
+      return;
+    }
+    if (target.dataset.orderContract) {
+      const orderId = Number(target.dataset.orderContract);
+      const data = await api(`/api/orders/${orderId}/contract`);
+      openContractPrint(data.contract);
+      return;
+    }
+    if (target.dataset.invoiceStatus) {
+      const [invId, status] = target.dataset.invoiceStatus.split(":");
+      if (status === "cancelled" && !confirm("Отменить счёт?")) return;
+      if (status === "paid" && !confirm("Отметить счёт оплаченным?")) return;
+      await api(`/api/invoices/${invId}`, { method: "PUT", body: JSON.stringify({ status }) });
+      showToast(`Статус счёта: ${status === "paid" ? "оплачен" : "отменён"}`, "success");
+      const refreshed = await api(`/api/invoices/${invId}`);
+      showInvoiceDetail(refreshed.invoice);
+      if (state.dashboardTab === "invoices") { await loadInvoices(); if (state.view === "dashboard") renderDashboard(); }
+      return;
+    }
+    if (target.dataset.reportResolve) {
+      const [reportId, status, hide] = target.dataset.reportResolve.split(":");
+      if (!confirm(status === "rejected" ? "Отклонить жалобу?" : "Принять жалобу и скрыть объект?")) return;
+      await api(`/api/admin/reports/${reportId}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ status, hide_target: hide === "hide" }),
+      });
+      showToast("Жалоба обработана", "success");
+      await loadAdminReports();
+      return render();
+    }
+    if (target.dataset.closeOrder) {
+      const orderId = Number(target.dataset.closeOrder);
+      if (!confirm("Завершить заказ? После завершения можно оставить отзыв.")) return;
+      try {
+        await api(`/api/orders/${orderId}/close`, { method: "POST", body: JSON.stringify({}) });
+        showToast("Заказ завершён. Теперь можно оставить отзыв.", "success");
+      } catch (error) {
+        if (String(error.message).includes("этап")) {
+          if (confirm(`${error.message}\n\nЗавершить без этапов?`)) {
+            await api(`/api/orders/${orderId}/close`, { method: "POST", body: JSON.stringify({ force: true }) });
+            showToast("Заказ завершён с подтверждением.", "success");
+          } else return;
+        } else throw error;
+      }
+      await refreshData();
+      return render();
     }
     if (target.dataset.reportOrder) {
       const orderId = Number(target.dataset.reportOrder);
@@ -3251,6 +4142,7 @@ document.addEventListener("click", async (event) => {
       state.adminTab = target.dataset.adminTab;
       if (state.adminTab === "analytics") loadAdminAnalytics();
       if (state.adminTab === "activity") loadAdminActivity();
+      if (state.adminTab === "reports") await loadAdminReports();
       return render();
     }
     if (target.dataset.action === "export-analytics") {
@@ -3316,6 +4208,14 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("change", async (event) => {
+  if (event.target.matches("[data-compare-toggle]")) {
+    const [orderId, makerId] = event.target.dataset.compareToggle.split(":").map(Number);
+    const idx = state.compareResponses.findIndex((x) => x.orderId === orderId && x.makerId === makerId);
+    if (event.target.checked) {
+      if (idx < 0) state.compareResponses.push({ orderId, makerId });
+    } else if (idx >= 0) state.compareResponses.splice(idx, 1);
+    return render();
+  }
   if (event.target.matches("#typeFilter")) { await loadOrders(); renderMarket(); }
   if (event.target.matches("#statusFilter")) { await loadOrders(); renderMarket(); }
   if (event.target.matches("#companyTypeFilter")) { state.companyFilters.type = event.target.value; await loadCompanies(); renderCompanies(); }
@@ -3365,6 +4265,11 @@ document.addEventListener("submit", async (event) => {
       state.dashboardTab = "my-orders";
       return render();
     }
+    if (event.target.id === "estimateForm") {
+      event.preventDefault();
+      await runEstimate(event.target);
+      return;
+    }
     if (event.target.id === "responseForm") {
       const orderId = event.target.dataset.orderId;
       const data = Object.fromEntries(new FormData(event.target));
@@ -3373,15 +4278,58 @@ document.addEventListener("submit", async (event) => {
       state.dashboardTab = "responses"; state.view = "dashboard";
       return render();
     }
+    if (event.target.id === "proposalForm") {
+      const form = event.target;
+      const orderId = form.dataset.orderId;
+      const fd = new FormData(form);
+      const nameEls = form.querySelectorAll('[name="item_name"]');
+      const qtyEls = form.querySelectorAll('[name="item_qty"]');
+      const priceEls = form.querySelectorAll('[name="item_price"]');
+      const items = [];
+      nameEls.forEach((n, i) => {
+        const name = (n.value || "").trim();
+        if (!name) return;
+        items.push({
+          name,
+          qty: Math.max(1, Number(qtyEls[i]?.value || 1)),
+          price: Math.max(0, Number(priceEls[i]?.value || 0)),
+        });
+      });
+      await api(`/api/orders/${orderId}/proposals`, {
+        method: "POST",
+        body: JSON.stringify({
+          amount: Number(fd.get("amount") || 0),
+          days: Number(fd.get("days") || 0),
+          message: String(fd.get("message") || ""),
+          items,
+        }),
+      });
+      document.querySelector("#proposalModal")?.remove();
+      showToast("КП отправлено заказчику", "success");
+      await openProposalsModal(Number(orderId));
+      return;
+    }
     if (event.target.id === "serviceForm") {
-      const data = Object.fromEntries(new FormData(event.target));
+      const form = event.target;
+      const data = Object.fromEntries(new FormData(form).entries());
+      const names = form.querySelectorAll('[name="param_name"]');
+      const values = form.querySelectorAll('[name="param_value"]');
+      const params = [];
+      names.forEach((n, i) => {
+        const name = (n.value || "").trim();
+        const value = (values[i]?.value || "").trim();
+        if (name) params.push({ name, value });
+      });
+      data.params = JSON.stringify(params);
       const modal = document.querySelector("#serviceModal");
       const isEdit = modal?.querySelector("[data-edit-service]");
       if (isEdit) {
         await api(`/api/services/${isEdit.dataset.editService}`, { method: "PUT", body: JSON.stringify(data) });
         showToast("Услуга обновлена", "success");
       } else {
-        await api("/api/services", { method: "POST", body: new FormData(event.target) });
+        const fd = new FormData(form);
+        fd.set("params", data.params);
+        await api("/api/services", { method: "POST", body: fd });
         showToast("Услуга добавлена", "success");
       }
       modal?.remove();
@@ -3466,9 +4414,22 @@ document.addEventListener("submit", async (event) => {
       return render();
     }
     if (event.target.id === "notifPrefsForm") {
-      const data = Object.fromEntries(new FormData(event.target));
+      const form = event.target;
+      const data = Object.fromEntries(new FormData(form));
+      const tg = String(data.telegram_chat_id || "").trim();
+      const mx = String(data.max_chat_id || "").trim();
+      delete data.telegram_chat_id;
+      delete data.max_chat_id;
       Object.keys(data).forEach(k => data[k] = data[k] === "on" ? 1 : 0);
       await api("/api/notifications/preferences", { method: "POST", body: JSON.stringify(data) });
+      if (tg !== (state.user?.telegram_chat_id || "")) {
+        const r = await api("/api/messenger/link", { method: "POST", body: JSON.stringify({ channel: "telegram", chat_id: tg }) });
+        if (r.user) state.user = r.user;
+      }
+      if (mx !== (state.user?.max_chat_id || "")) {
+        const r = await api("/api/messenger/link", { method: "POST", body: JSON.stringify({ channel: "max", chat_id: mx }) });
+        if (r.user) state.user = r.user;
+      }
       state.notifPrefs = data;
       state.notifView = "list";
       showToast("Настройки уведомлений сохранены", "success");
@@ -3616,7 +4577,12 @@ registerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   authMessage.textContent = "";
   try {
-    const result = await api("/api/register", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(registerForm))) });
+    const payload = Object.fromEntries(new FormData(registerForm));
+    if (!payload.consent_pd) {
+      authMessage.textContent = "Отметьте согласие на обработку персональных данных и прием оферты";
+      return;
+    }
+    const result = await api("/api/register", { method: "POST", body: JSON.stringify(payload) });
     csrfToken = null;
     await ensureCsrfToken();
     state.verifyUrl = result.verify_url || state.verifyUrl;
@@ -3836,7 +4802,29 @@ document.querySelectorAll("[data-auth-tab]").forEach((b) => b.addEventListener("
 const savedTheme = localStorage.getItem("meblio-theme");
 if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
 
+function initCookieBanner() {
+  try {
+    if (localStorage.getItem("meblio-cookie-ok")) return;
+  } catch {}
+  if (document.getElementById("cookieBanner")) return;
+  const el = document.createElement("div");
+  el.id = "cookieBanner";
+  el.className = "cookie-banner";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-label", "Уведомление о cookie");
+  el.innerHTML = `
+    <p>Мы используем cookie для работы сайта, авторизации и сохранения настроек.
+      Подробнее — в <a href="/privacy" data-nav>Политике конфиденциальности</a>.</p>
+    <button class="button button-primary button-small" type="button" id="cookieAcceptBtn">Принять</button>`;
+  document.body.appendChild(el);
+  el.querySelector("#cookieAcceptBtn")?.addEventListener("click", () => {
+    try { localStorage.setItem("meblio-cookie-ok", "1"); } catch {}
+    el.remove();
+  });
+}
+
 applyRoute(location.pathname);
+initCookieBanner();
 initAiWidget();
 loadSession().then(render).catch((error) => {
   app.innerHTML = `<section class="section"><div class="container"><div class="empty">${escapeHtml(error.message)}</div></div></section>`;

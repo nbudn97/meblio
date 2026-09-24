@@ -263,6 +263,26 @@ def init_db():
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS service_params (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              service_id INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              value TEXT NOT NULL DEFAULT '',
+              sort_order INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS proposals (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+              maker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              amount INTEGER NOT NULL DEFAULT 0,
+              days INTEGER NOT NULL DEFAULT 0,
+              message TEXT NOT NULL DEFAULT '',
+              items TEXT NOT NULL DEFAULT '[]',
+              status TEXT NOT NULL DEFAULT 'sent',
+              created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS service_files (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               service_id INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
@@ -434,6 +454,17 @@ def init_db():
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS order_stages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              position INTEGER NOT NULL DEFAULT 0,
+              done INTEGER NOT NULL DEFAULT 0,
+              done_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+              done_at TEXT,
+              created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS delivery_tracking (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -561,9 +592,19 @@ def init_db():
         ensure_column("users", "ogrn", "ogrn TEXT NOT NULL DEFAULT ''")
         ensure_column("users", "website", "website TEXT NOT NULL DEFAULT ''")
         ensure_column("users", "is_public", "is_public INTEGER NOT NULL DEFAULT 1")
+        ensure_column("users", "consent_pd_at", "consent_pd_at TEXT")
+        ensure_column("users", "is_moderation_hidden", "is_moderation_hidden INTEGER NOT NULL DEFAULT 0")
+        ensure_column("users", "verified_requisites_at", "verified_requisites_at TEXT")
+        ensure_column("users", "plan", "plan TEXT NOT NULL DEFAULT 'free'")
+        ensure_column("users", "telegram_chat_id", "telegram_chat_id TEXT NOT NULL DEFAULT ''")
+        ensure_column("users", "max_chat_id", "max_chat_id TEXT NOT NULL DEFAULT ''")
         ensure_column("email_verifications", "purpose", "purpose TEXT NOT NULL DEFAULT 'verify'")
         ensure_column("orders", "is_hidden", "is_hidden INTEGER NOT NULL DEFAULT 0")
+        ensure_column("orders", "warranty_until", "warranty_until TEXT")
+        ensure_column("orders", "due_at", "due_at TEXT")
+        ensure_column("orders", "deadline_notified", "deadline_notified TEXT")
         ensure_column("services", "is_hidden", "is_hidden INTEGER NOT NULL DEFAULT 0")
+        ensure_column("reviews", "is_hidden", "is_hidden INTEGER NOT NULL DEFAULT 0")
         ensure_column("regions", "slug", "slug TEXT NOT NULL DEFAULT ''")
 
         # Regions: keep reference list in sync and maintain slugs
@@ -585,6 +626,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_threads_order ON threads(order_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_ai_messages_user ON ai_messages(user_id, id);
+            CREATE INDEX IF NOT EXISTS idx_service_params_service ON service_params(service_id);
+            CREATE INDEX IF NOT EXISTS idx_proposals_order ON proposals(order_id);
+            CREATE INDEX IF NOT EXISTS idx_responses_maker_created ON responses(maker_id, created_at);
             """
         )
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -599,14 +643,14 @@ def init_db():
             seed_suppliers(conn)
 
 
-def create_user(conn, role, name, email, password, city="", phone="", about="", skills="", capacity="", company_type="client", region_id=None):
+def create_user(conn, role, name, email, password, city="", phone="", about="", skills="", capacity="", company_type="client", region_id=None, consent_pd_at=None):
     salt, digest = hash_password(password)
     cur = conn.execute(
         """
-        INSERT INTO users (role, company_type, name, email, city, region_id, phone, about, skills, capacity, password_salt, password_hash, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (role, company_type, name, email, city, region_id, phone, about, skills, capacity, password_salt, password_hash, created_at, consent_pd_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (role, company_type, name, email.lower(), city, region_id, phone, about, skills, capacity, salt, digest, now()),
+        (role, company_type, name, email.lower(), city, region_id, phone, about, skills, capacity, salt, digest, now(), consent_pd_at),
     )
     return cur.lastrowid
 

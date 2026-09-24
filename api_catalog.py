@@ -189,6 +189,38 @@ class CatalogMixin:
                 f"/invoices")
         self.send_json(200, {"ok": True, "id": cur.lastrowid})
 
+    def api_update_invoice(self, invoice_id):
+        data = self.read_json()
+        status = data.get("status", "")
+        allowed = {
+            "pending": {"paid", "cancelled"},
+            "paid": {"cancelled"},
+            "cancelled": set(),
+        }
+        if status not in ("pending", "paid", "cancelled"):
+            return self.send_error_json(400, "Некорректный статус счёта")
+        with connect() as conn:
+            user = self.require_user(conn)
+            if not user:
+                return
+            inv = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+            if not inv:
+                return self.send_error_json(404, "Счёт не найден")
+            if user["id"] not in (inv["from_user_id"], inv["to_user_id"]) and user["role"] != "admin":
+                return self.send_error_json(403, "Менять счёт могут только его участники")
+            if status == inv["status"]:
+                return self.send_json(200, {"ok": True, "status": status})
+            if status not in allowed.get(inv["status"], set()):
+                return self.send_error_json(409, f"Нельзя перевести счёт из «{inv['status']}» в «{status}»")
+            conn.execute("UPDATE invoices SET status = ? WHERE id = ?", (status, invoice_id))
+            other = inv["to_user_id"] if user["id"] == inv["from_user_id"] else inv["from_user_id"]
+            labels = {"paid": "оплачен", "cancelled": "отменён", "pending": "ожидает оплаты"}
+            create_notification(conn, other, "system",
+                "Статус счёта изменён",
+                f"Счёт №{invoice_id} на {inv['amount']} руб. — {labels[status]}",
+                f"/dashboard/invoices")
+        self.send_json(200, {"ok": True, "status": status})
+
     # --- Delivery Tracking ---
     def api_delivery_list(self, query):
         params = parse_qs(query)
@@ -327,11 +359,11 @@ class CatalogMixin:
         self.send_json(200, {"certificate": dict(cert)})
 
     def api_create_certificate(self):
-        with connect() as conn:
-            user = self.require_user(conn)
-            if not user:
-                return
-            try:
+        try:
+            with connect() as conn:
+                user = self.require_user(conn)
+                if not user:
+                    return
                 fields, files = self.read_multipart()
                 stored_name = ""
                 original_name = ""
@@ -344,9 +376,10 @@ class CatalogMixin:
                      fields.get("number", ""), fields.get("issued_by", ""), fields.get("issued_at", ""),
                      fields.get("expires_at", ""), stored_name, original_name, now()),
                 )
-                self.send_json(200, {"ok": True, "id": cur.lastrowid})
-            except Exception as exc:
-                self.send_error_json(400, str(exc))
+                cert_id = cur.lastrowid
+        except Exception as exc:
+            return self.send_error_json(400, str(exc))
+        self.send_json(200, {"ok": True, "id": cert_id})
 
     def api_update_certificate(self, cert_id):
         data = self.read_json()

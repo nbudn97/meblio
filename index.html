@@ -8,14 +8,12 @@
       name="description"
       content="Meblio - рабочая площадка для общения заказчиков мебели и мебельных производств: заказы, отклики, личные кабинеты и чат."
     >
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="icon" href="/meblio.png" type="image/png">
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#ffffff">
     <link rel="apple-touch-icon" href="/meblio-512.png">
-    <link rel="stylesheet" href="styles.css?v=13">
+    <link rel="stylesheet" href="/fonts/fonts.css">
+    <link rel="stylesheet" href="styles.css?v=19">
   </head>
   <body>
     <header class="site-header">
@@ -64,10 +62,16 @@
           <a href="/market" data-nav>Заказы</a>
           <a href="/companies" data-nav>Компании</a>
           <a href="/services" data-nav>Услуги</a>
+          <a href="/tariffs" data-nav>Тарифы</a>
         </div>
         <div>
           <h4>Знания</h4>
           <a href="/articles" data-nav>Статьи</a>
+        </div>
+        <div>
+          <h4>Правовая информация</h4>
+          <a href="/privacy" data-nav>Политика конфиденциальности</a>
+          <a href="/offer" data-nav>Публичная оферта</a>
         </div>
       </div>
       <div class="container footer-bottom">© 2026 Meblio · mebl.io</div>
@@ -154,6 +158,10 @@
             Компетенции производства
             <input name="skills" type="text" placeholder="Кухни, шкафы, HoReCa, монтаж">
           </label>
+          <label class="check-label consent-label">
+            <input name="consent_pd" type="checkbox" value="1" required>
+            <span>Я согласен(на) на обработку персональных данных в соответствии с <a href="/privacy" data-nav>Политикой конфиденциальности</a> и принимаю <a href="/offer" data-nav>Условия публичной оферты</a></span>
+          </label>
           <button class="button button-primary" type="submit">Создать кабинет</button>
         </form>
         <p class="form-result" id="authMessage" aria-live="polite"></p>
@@ -161,6 +169,6 @@
     </div>
 
     <script src="/config.js"></script>
-    <script src="script.js?v=16"></script>
+    <script src="script.js?v=21"></script>
   </body>
 </html>
